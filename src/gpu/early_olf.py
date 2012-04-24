@@ -1,7 +1,7 @@
 """
   FileName    [ early_olf.py ]
   PackageName [ gpu ]
-  Synopsis    [ Define class CmdParser ]
+  Synopsis    [ CPU/GPU simulation for the Early Olfaction of Drosphila ]
   Author      [ Chung-Heng Yeh <chyeh@ee.columbia.edu> ]
   Copyright   [ Copyleft(c) 2012-2014 Bionet Group at Columbia University ]
   Note        []
@@ -38,9 +38,19 @@ struct LeakyIAF
     double Vt;
     double tau;
     double R;
+    int    num;
+    int    offset;
     //double I;
 };
-
+struct AlphaSyn
+{
+    double g;
+    double gmax;
+    double tau;
+    double sign;
+    int    num;    // number of innerved neuron 
+    int    offset; // Offset in the array
+};
 #define update_V( neuron, bh, spk )  \
 {                                    \
     neuron.V = neuron.V*bh;          \
@@ -57,6 +67,23 @@ struct LeakyIAF
     bh = exp( -dt/neuron.tau );             \
     ic = neuron.R*( 1.0-bh );               \
 }
+#define update_G( g, g_old, g_new, g_tau_reci  )                 \
+{                                                                \
+    // Update g(t)                                               \
+    g_new[0] = g_old[0] + dt*g_old[1];                           \
+    if( g_new[0] < 0.0 ) g_new[0] = 0.0;                         \
+    // Update g'(t)                                              \
+    g_new[1] = g_old[1] + dt*g_old[2];                           \
+    for( int i=0; i<0; ++i)                                      \
+    {                                                            \
+        // Inject spike                                          \
+    }                                                            \
+    // Update g"(t)                                              \
+    g_new[2] = (-2.0*g_old[1] - g_tau_reci*g_old[2])* g_tau_reci;\ 
+    // Copy g_old to g_new                                       \
+    for( int i=0; i <3; ++i ) g_old[i] = g_new[i];               \
+    g = g_new[0];                                                \
+}
 __global__ void gpu_run( int N, double dt, 
                          int neu_num, LeakyIAF *neuron,
                          int *spike_list
@@ -70,8 +97,13 @@ __global__ void gpu_run( int N, double dt,
     const int nid = tid;  // neuron id
     const int gid = tid;  // 
     
+    double gnew[3];
+    double gold[3] = {0, 0, 0};
     int sid = nid*N; // spike id, updated per dt
+    
+
     if( nid >= neu_num ) return;
+
 
     // Compute coefficients for Exponential Euler Method
     compute_ode_coef( neuron[nid], BH[tid], IC[tid] )
@@ -80,12 +112,17 @@ __global__ void gpu_run( int N, double dt,
     for( int i = 0; i<N; ++i )
     {
         // Update Neuron Membrane Voltage
-        update_V( neuron[nid], BH[tid], spike_list[sid] );
+        if( nid < neu_num )
+            update_V( neuron[nid], BH[tid], spike_list[sid] );
 
+        // Update Synapse Status
+        //if( nid < syn_num )
+            
         // Update Spike ID
         sid += 1;
     }
 }
+
 """
 
 cuda_func = SourceModule(cuda_source, options = ["--ptxas-options=-v"])
@@ -226,14 +263,17 @@ class Early_olfaction_Network:
         self.spk_list = []
         self.Num = len(self.neu_list)
 
-    def cpu_prepare(self,dt,dur):
+    def basic_prepare(self,dt,dur):
         self.Nt = int(dur/dt)
         self.dt = dt
         self.dur = dur
         self.spk_list = np.zeros((self.Num, self.Nt), np.int32)
+ 
+    def cpu_prepare(self,dt,dur):
+        self.basic_prepare(dt,dur)
         for neu in self.neu_list:
             neu.update_BH(dt)
-
+ 
     def cpu_run(self,dt,dur,I_ext=np.empty((0,0))):
         self.cpu_prepare(dt,dur)
         pbar = pb.ProgressBar(maxval=self.Nt).start()
@@ -254,24 +294,40 @@ class Early_olfaction_Network:
         print ""
             
     def gpu_prepare(self,dt,dur):
-        self.Nt = int(dur/dt)
-        self.dt = dt
-        self.dur = dur
-        self.spk_list = np.zeros((self.Num, self.Nt), np.int32)
-        self.gpu_neu_list = np.zeros((self.Num, 5), np.float64)
+        self.basic_prepare(dt,dur)
+        
+        # Merge Neuron data
+        gpu_neu_list = np.zeros( self.Num, dtype=('f8,f8,f8,f8,f8,i4,i4') )
+        offset, agg_syn = 0,[]
         for i in xrange( self.Num ):
-            neu = self.neu_list[i]
-            self.gpu_neu_list[i,:] = [neu.V, neu.Vr, neu.Vt, neu.tau, neu.R]
-    def gpu_end(self):
-        del self.gpu_neu_list
+            n = self.neu_list[i]
+            gpu_neu_list[i] = ( n.V, n.Vr, n.Vt, n.tau,
+                                n.R, len(n.syn_list), offset)
+            offset += len( n.syn_list )
+            agg_syn.extend( n.syn_list  )
+        gpu_neu_syn_list = np.array( agg_syn, dtype=np.int32 )
+        
+        # Merge Synapse data
+        syn_num = len(self.syn_list)
+        gpu_syn_list = np.zeros( (syn_num,6),dtype=('f8,f8,f8,f8,i4,i4') )
+        offset, agg_neu, agg_w = 0, [], []
+        for i in xrange( syn_num ):
+            s = self.syn_list[i]
+            gpu_syn_list[i,:] = (s.g, syn.gmax, s.tau, s.sign, 
+                                 len(s.neu_list), offset)
+            offset += len(s.neu_list)
+            agg_neu.extend( s.neu_list )
+            agg_w.extend( s.w )
+        gpu_syn_neu_list = np.array( zip(agg_neu,agg_w), dtype=('i4,f8') )
+
+        return gpu_neu_list, gpu_neu_syn_list, gpu_syn_list, gpu_syn_neu_list
 
     def gpu_run(self,dt,dur):
-        self.gpu_prepare(dt,dur)
+        neu_list,neu_syn_list,syn_list,syn_neu_list = self.gpu_prepare(dt,dur)
         cuda_gpu_run( np.int32(self.Nt), np.double( dt ), 
-                      np.int32(self.Num), drv.In(self.gpu_neu_list),
+                      np.int32(self.Num), drv.In(neu_list),
                       drv.Out( self.spk_list ),
                       block=(1024,1,1) )
-        self.gpu_end()
 
     def compare_cpu_gpu(self,dt,dur):
         self.gpu_run(dt,dur)
