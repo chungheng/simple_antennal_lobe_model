@@ -77,13 +77,15 @@ struct AlphaSyn
     ic = neuron.R*( 1.0-bh );                                    \
     n_s_list = all_neu_syn_list + neuron.offset;                 \
 }
-#define syn_thread_copy( synapse, tr, s_n_list,                  \
+#define syn_thread_copy( synapse, tr, gmax, s_n_list,            \
                          all_syn_neu_list )                      \
 {                                                                \
-    tr = synapse.tau;                                            \
+    gmax = synapse.gmax;                                         \
+    tr = 1/synapse.tau;                                          \
     s_n_list = all_syn_neu_list + synapse.offset;                \
 }
-#define update_G( synapse, g_old, g_new, tau_re, s_n_list, N, i) \
+#define update_G( synapse, g_old, g_new, gmax, tr, s_n_list,     \
+                  spk_list  )                                    \
 {                                                                \
     // Update g(t)                                               \
     g_new[0] = g_old[0] + dt*g_old[1];                           \
@@ -92,14 +94,15 @@ struct AlphaSyn
     // Update g'(t)                                              \
     g_new[1] = g_old[1] + dt*g_old[2];                           \
     for( int j=0; j<synapse.num; ++j)                            \
-        if( spk_list[i+s_n_list[j].neu_idx*N] )                  \
+        if( spk_list[ s_n_list[j].neu_idx ] )                    \
             g_new[1] += s_n_list[j].neu_coe;                     \
                                                                  \
     // Update g"(t)                                              \
-    g_new[2] = (-2.0*g_old[1] - tau_re*g_old[2])*tau_re; i       \ 
+    g_new[2] = (-2.0*g_old[1] - tr*g_old[2])*tr;                 \ 
     // Copy g_old to g_new                                       \
     for( int i=0; i <3; ++i ) g_old[i] = g_new[i];               \
-    synapse.g = g_new[0];                                        \
+    synapse.g = gmax*g_new[0];                                   \
+    __syncthreads();                                             \
 }
 __global__ void gpu_run( int N, double dt, 
                          int neu_num, LeakyIAF *neuron, 
@@ -117,19 +120,22 @@ __global__ void gpu_run( int N, double dt,
     const int uid = tid;  // unit id; unit is either neuron or synapse
     int sid = uid;        // spike id, updated per dt
     
+    
+
     // local copy of neuron parameters
     int* n_s_list;
     double bh, ic;
+    int *dt_spk_list = spike_list;
     if( uid < neu_num )
         neu_thread_copy( neuron[uid], bh, ic, n_s_list, neu_syn_list );
 
 
     // local copy of synapse parameters
-    double g_new[3],tau_reci;
+    double g_new[3],tau_r, gmax;
     double g_old[3] = {0, 0, 0};
     AlphaSynNL *s_n_list;
     if( uid < syn_num )
-        syn_thread_copy( synapse[uid], tau_reci, s_n_list, syn_neu_list );
+        syn_thread_copy( synapse[uid], tau_r, gmax, s_n_list, syn_neu_list );
 
 
     // Compute coefficients for Exponential Euler Method
@@ -144,11 +150,12 @@ __global__ void gpu_run( int N, double dt,
             update_V( neuron[uid], bh, spike_list[sid] );
 
         // Update Synapse Status
-        //if( nid < syn_num )
-        //    update_G(  )
-
-        // Update Spike ID
+        if( uid < syn_num )
+            update_G( synapse[uid], g_old, g_new, gmax, tau_r, s_n_list, dt_spk_list );
+        
+        // Update Spike ID and dt-spike array address
         sid += neu_num;
+        dt_spk_list += neu_num;
     }
 }
 """
