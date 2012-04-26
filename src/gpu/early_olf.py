@@ -84,26 +84,28 @@ struct AlphaSyn
     tr = 1/synapse.tau;                                          \
     s_n_list = all_syn_neu_list + synapse.offset;                \
 }
-#define update_G( synapse, g_old, g_new, gmax, tr, s_n_list,     \
-                  spk_list  )                                    \
+
+#define update_G( synapse, g_old, g_new, gmax, tr,               \
+                  s_n_list,  spk_list  )                         \
 {                                                                \
-    // Update g(t)                                               \
-    g_new[0] = g_old[0] + dt*g_old[1];                           \
+    /* Update g(t) */                                            \
+    g_new[0] = g_old[0];                                         \
     if( g_new[0] < 0.0 ) g_new[0] = 0.0;                         \
                                                                  \
-    // Update g'(t)                                              \
+    /* Update g'(t) */                                           \
     g_new[1] = g_old[1] + dt*g_old[2];                           \
     for( int j=0; j<synapse.num; ++j)                            \
         if( spk_list[ s_n_list[j].neu_idx ] )                    \
             g_new[1] += s_n_list[j].neu_coe;                     \
                                                                  \
-    // Update g"(t)                                              \
-    g_new[2] = (-2.0*g_old[1] - tr*g_old[2])*tr;                 \ 
-    // Copy g_old to g_new                                       \
-    for( int i=0; i <3; ++i ) g_old[i] = g_new[i];               \
+    /* Update g"(t) */                                           \
+    g_new[2] = (-2.0*g_old[1] - tr*g_old[2])*tr;                 \
+    /* Copy g_old to g_new */                                    \
+    for( int i=0; i<3; ++i ) g_old[i] = g_new[i];                \
     synapse.g = gmax*g_new[0];                                   \
     __syncthreads();                                             \
 }
+
 __global__ void gpu_run( int N, double dt, 
                          int neu_num, LeakyIAF *neuron, 
                          int *neu_syn_list,
@@ -151,7 +153,8 @@ __global__ void gpu_run( int N, double dt,
 
         // Update Synapse Status
         if( uid < syn_num )
-            update_G( synapse[uid], g_old, g_new, gmax, tau_r, s_n_list, dt_spk_list );
+            update_G( synapse[uid], g_old, g_new, 
+                      gmax, tau_r, s_n_list, dt_spk_list );
         
         // Update Spike ID and dt-spike array address
         sid += neu_num;
@@ -355,6 +358,8 @@ class Early_olfaction_Network:
             agg_coe.extend( s.neu_coef )
         gpu_syn_neu_list = np.array( zip(agg_neu,agg_coe), dtype=('i4,f8') )
 
+        # Determine Bloack and Grid size
+        # TODO
         return gpu_neu_list, gpu_neu_syn_list, gpu_syn_list, gpu_syn_neu_list
 
     def gpu_run(self,dt,dur):
