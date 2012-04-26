@@ -50,7 +50,7 @@ struct AlphaSyn
 {
     double g;
     double gmax;
-    double tau;
+    double taur;
     double sign;
     int    num;    // number of innerved neuron 
     int    offset; // Offset in the array
@@ -81,7 +81,7 @@ struct AlphaSyn
                          all_syn_neu_list )                      \
 {                                                                \
     gmax = synapse.gmax;                                         \
-    tr = 1/synapse.tau;                                          \
+    tr = synapse.taur;                                          \
     s_n_list = all_syn_neu_list + synapse.offset;                \
 }
 
@@ -170,15 +170,15 @@ class AlphaSyn:
     def __init__(self, neu_list, neu_coef, gmax, tau, sign=1):
         self.neu_list = neu_list
         self.neu_coef = neu_coef
-        self.tau = tau
+        self.taur = 1.0/tau
         self.gmax = gmax
-        self.gvec = np.array([0, 1/tau**2, 0]) #[g(t) g'(t) g"(t)] 
+        self.gvec = np.array([0., 0., 0.]) #[g(t) g'(t) g"(t)] 
         self.sign = sign # -1:inhibitory; 1:excitatory
 
     def update(self,dt,spk_list):
         g_new = np.zeros(3);
         # update g(t)
-        g_new[0] = max([0,self.gvec[0] + dt * self.gvec[1]]);
+        g_new[0] = max([0.,self.gvec[0] + dt * self.gvec[1]]);
         # update g'(t)
         g_new[1] = self.gvec[1] + dt * self.gvec[2]
         #g_new[1] = self.gvec[1] + np.dot(self.neu_coef,spk_list[self.neu_list])
@@ -187,7 +187,7 @@ class AlphaSyn:
             if spk_list[n]:
                 g_new[1] += w
         # upate g"(t)
-        g_new[2] = (-2*self.gvec[1] - 1/self.tau*self.gvec[0])/self.tau;
+        g_new[2] = (-2*self.gvec[1] - self.taur*self.gvec[0])*self.taur;
         self.gvec = g_new
         
     def _get_g(self):
@@ -351,7 +351,7 @@ class Early_olfaction_Network:
         offset, agg_neu, agg_coe = 0, [], []
         for i in xrange( self.syn_num ):
             s = self.syn_list[i]
-            gpu_syn_list[i,:] = (s.g, s.gmax, s.tau, s.sign, 
+            gpu_syn_list[i,:] = (s.g, s.gmax, s.taur, s.sign, 
                                  len(s.neu_list), offset)
             offset += len(s.neu_list)
             agg_neu.extend( s.neu_list )
