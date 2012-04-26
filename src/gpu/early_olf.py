@@ -40,7 +40,11 @@ struct LeakyIAF
     double R;
     int    num;
     int    offset;
-    //double I;
+};
+struct AlphaSynNL
+{
+    int    neu_idx;
+    double neu_coe;
 };
 struct AlphaSyn
 {
@@ -61,68 +65,92 @@ struct AlphaSyn
         spk = 1;                     \
     }                                \
 }
-
 #define compute_ode_coef( neuron, bh, ic )  \
 {                                           \
     bh = exp( -dt/neuron.tau );             \
     ic = neuron.R*( 1.0-bh );               \
 }
-#define update_G( g, g_old, g_new, g_tau_reci  )                 \
+#define neu_thread_copy( neuron, bh, ic, n_s_list,               \
+                         all_neu_syn_list )                      \
+{                                                                \
+    bh = exp( -dt/neuron.tau );                                  \
+    ic = neuron.R*( 1.0-bh );                                    \
+    n_s_list = all_neu_syn_list + neuron.offset;                 \
+}
+#define syn_thread_copy( synapse, tr, s_n_list,                  \
+                         all_syn_neu_list )                      \
+{                                                                \
+    tr = synapse.tau;                                            \
+    s_n_list = all_syn_neu_list + synapse.offset;                \
+}
+#define update_G( synapse, g_old, g_new, tau_re, s_n_list, N, i) \
 {                                                                \
     // Update g(t)                                               \
     g_new[0] = g_old[0] + dt*g_old[1];                           \
     if( g_new[0] < 0.0 ) g_new[0] = 0.0;                         \
+                                                                 \
     // Update g'(t)                                              \
     g_new[1] = g_old[1] + dt*g_old[2];                           \
-    for( int i=0; i<0; ++i)                                      \
-    {                                                            \
-        // Inject spike                                          \
-    }                                                            \
+    for( int j=0; j<synapse.num; ++j)                            \
+        if( spk_list[i+s_n_list[j].neu_idx*N] )                  \
+            g_new[1] += s_n_list[j].neu_coe;                     \
+                                                                 \
     // Update g"(t)                                              \
-    g_new[2] = (-2.0*g_old[1] - g_tau_reci*g_old[2])* g_tau_reci;\ 
+    g_new[2] = (-2.0*g_old[1] - tau_re*g_old[2])*tau_re; i       \ 
     // Copy g_old to g_new                                       \
     for( int i=0; i <3; ++i ) g_old[i] = g_new[i];               \
-    g = g_new[0];                                                \
+    synapse.g = g_new[0];                                        \
 }
 __global__ void gpu_run( int N, double dt, 
-                         int neu_num, LeakyIAF *neuron,
+                         int neu_num, LeakyIAF *neuron, 
+                         int *neu_syn_list,
+                         int syn_num, AlphaSyn *synapse, 
+                         AlphaSynNL *syn_neu_list,
                          int *spike_list
                        )
 {
     // Constant for neuron update
-    __shared__ double BH[MAX_THREAD];
-    __shared__ double IC[MAX_THREAD]; 
+    //__shared__ double BH[MAX_THREAD];
+    //__shared__ double IC[MAX_THREAD]; 
 
     const int tid = threadIdx.x+threadIdx.y*blockDim.x;
-    const int nid = tid;  // neuron id
-    const int gid = tid;  // 
+    const int uid = tid;  // unit id; unit is either neuron or synapse
+    int sid = uid;        // spike id, updated per dt
     
-    double gnew[3];
-    double gold[3] = {0, 0, 0};
-    int sid = nid*N; // spike id, updated per dt
-    
+    // local copy of neuron parameters
+    int* n_s_list;
+    double bh, ic;
+    if( uid < neu_num )
+        neu_thread_copy( neuron[uid], bh, ic, n_s_list, neu_syn_list );
 
-    if( nid >= neu_num ) return;
+
+    // local copy of synapse parameters
+    double g_new[3],tau_reci;
+    double g_old[3] = {0, 0, 0};
+    AlphaSynNL *s_n_list;
+    if( uid < syn_num )
+        syn_thread_copy( synapse[uid], tau_reci, s_n_list, syn_neu_list );
 
 
     // Compute coefficients for Exponential Euler Method
-    compute_ode_coef( neuron[nid], BH[tid], IC[tid] )
+    //if( uid < neu_num )
+    //    compute_ode_coef( neuron[uid], bh, ic )
     
     // Simulation Loop
     for( int i = 0; i<N; ++i )
     {
         // Update Neuron Membrane Voltage
-        if( nid < neu_num )
-            update_V( neuron[nid], BH[tid], spike_list[sid] );
+        if( uid < neu_num )
+            update_V( neuron[uid], bh, spike_list[sid] );
 
         // Update Synapse Status
         //if( nid < syn_num )
-            
+        //    update_G(  )
+
         // Update Spike ID
-        sid += 1;
+        sid += neu_num;
     }
 }
-
 """
 
 cuda_func = SourceModule(cuda_source, options = ["--ptxas-options=-v"])
@@ -153,7 +181,7 @@ class AlphaSyn:
         self.gvec = g_new
         
     def _get_g(self):
-        return self.gvec[0]
+        return self.gvec[0]*self.gmax
         
     g = property(_get_g)
 
@@ -261,13 +289,14 @@ class Early_olfaction_Network:
             if dtype == 'Ignore': self.readIgnore(f, int(dnum))
                 
         self.spk_list = []
-        self.Num = len(self.neu_list)
+        self.neu_num = len(self.neu_list)
+        self.syn_num = len(self.syn_list)
 
     def basic_prepare(self,dt,dur):
         self.Nt = int(dur/dt)
         self.dt = dt
         self.dur = dur
-        self.spk_list = np.zeros((self.Num, self.Nt), np.int32)
+        self.spk_list = np.zeros((self.Nt,self.neu_num), np.int32)
  
     def cpu_prepare(self,dt,dur):
         self.basic_prepare(dt,dur)
@@ -277,29 +306,29 @@ class Early_olfaction_Network:
     def cpu_run(self,dt,dur,I_ext=np.empty((0,0))):
         self.cpu_prepare(dt,dur)
         pbar = pb.ProgressBar(maxval=self.Nt).start()
-        dt_spk_list = np.empty(self.Num).astype(np.bool)
+        dt_spk_list = np.empty(self.neu_num).astype(np.bool)
         for i in xrange(self.Nt):
             pbar.update(i)
-            for j in xrange(self.Num):
+            for j in xrange(self.neu_num):
                 self.neu_list[j].update_V()
                 dt_spk_list[j] = self.neu_list[j].spk
             for syn in self.syn_list:
                 syn.update(dt,dt_spk_list)
-            for j in xrange(self.Num):
+            for j in xrange(self.neu_num):
                 if j < I_ext.shape[0] and i < I_ext.shape[1] :
                     self.neu_list[j].update_I(self.syn_list,I_ext[j,i])
                 else:
                     self.neu_list[j].update_I(self.syn_list)
-            self.spk_list[:,i] = dt_spk_list
+            self.spk_list[i,:] = dt_spk_list
         print ""
             
     def gpu_prepare(self,dt,dur):
         self.basic_prepare(dt,dur)
         
         # Merge Neuron data
-        gpu_neu_list = np.zeros( self.Num, dtype=('f8,f8,f8,f8,f8,i4,i4') )
+        gpu_neu_list = np.zeros( self.neu_num, dtype=('f8,f8,f8,f8,f8,i4,i4') )
         offset, agg_syn = 0,[]
-        for i in xrange( self.Num ):
+        for i in xrange( self.neu_num ):
             n = self.neu_list[i]
             gpu_neu_list[i] = ( n.V, n.Vr, n.Vt, n.tau,
                                 n.R, len(n.syn_list), offset)
@@ -308,26 +337,27 @@ class Early_olfaction_Network:
         gpu_neu_syn_list = np.array( agg_syn, dtype=np.int32 )
         
         # Merge Synapse data
-        syn_num = len(self.syn_list)
-        gpu_syn_list = np.zeros( (syn_num,6),dtype=('f8,f8,f8,f8,i4,i4') )
-        offset, agg_neu, agg_w = 0, [], []
-        for i in xrange( syn_num ):
+        gpu_syn_list = np.zeros( (self.syn_num,6),dtype=('f8,f8,f8,f8,i4,i4') )
+        offset, agg_neu, agg_coe = 0, [], []
+        for i in xrange( self.syn_num ):
             s = self.syn_list[i]
-            gpu_syn_list[i,:] = (s.g, syn.gmax, s.tau, s.sign, 
+            gpu_syn_list[i,:] = (s.g, s.gmax, s.tau, s.sign, 
                                  len(s.neu_list), offset)
             offset += len(s.neu_list)
             agg_neu.extend( s.neu_list )
-            agg_w.extend( s.w )
-        gpu_syn_neu_list = np.array( zip(agg_neu,agg_w), dtype=('i4,f8') )
+            agg_coe.extend( s.neu_coef )
+        gpu_syn_neu_list = np.array( zip(agg_neu,agg_coe), dtype=('i4,f8') )
 
         return gpu_neu_list, gpu_neu_syn_list, gpu_syn_list, gpu_syn_neu_list
 
     def gpu_run(self,dt,dur):
         neu_list,neu_syn_list,syn_list,syn_neu_list = self.gpu_prepare(dt,dur)
         cuda_gpu_run( np.int32(self.Nt), np.double( dt ), 
-                      np.int32(self.Num), drv.In(neu_list),
-                      drv.Out( self.spk_list ),
-                      block=(1024,1,1) )
+                      np.int32(self.neu_num), 
+                      drv.In(neu_list), drv.In(neu_syn_list),
+                      np.int32(self.syn_num),
+                      drv.In(syn_list), drv.In(syn_neu_list),
+                      drv.Out( self.spk_list ),block=(1024,1,1) )
 
     def compare_cpu_gpu(self,dt,dur):
         self.gpu_run(dt,dur)
@@ -349,20 +379,20 @@ class Early_olfaction_Network:
         p.clf()
         p.gcf().canvas.set_window_title(fig_title)
         ax = p.gca()
-        ax.axis([0, self.dur, -0.5, self.Num-0.5 ])
+        ax.axis([0, self.dur, -0.5, self.neu_num-0.5 ])
         
         if show_y_ticks:
-            p.yticks(xrange(self.Num))
+            p.yticks(xrange(self.neu_num))
         else:
             for tick_label in ax.get_yticklabels():
                 tick_label.set_visible(False)
-        for y in xrange(self.Num):
-            spk_time = self.spk_list[y].nonzero()[0]*self.dt
+        for y in xrange(self.neu_num):
+            spk_time = self.spk_list[:,y].nonzero()[0]*self.dt
             if show_axes:
                 p.axhline(y, 0, 1, color='b', hold=True)
             p.plot(spk_time, y*np.ones(len( spk_time )), 
                    marker, hold=True,
-                   color=(1-1./self.Num*y,0.5,1./self.Num*y),
+                   color=(1-1./self.neu_num*y,0.5,1./self.neu_num*y),
                    markersize=markersize,
                    scalex=False, scaley=False)
             if show_stems:
