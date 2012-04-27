@@ -99,8 +99,7 @@ struct AlphaSyn
     synapse.g = gmax*g_new[0];                                   \
     __syncthreads();                                             \
 }
-#define update_neu_I( neuron, I, synapse, n_s_list,              \
-                      post_g, I_ext )                            \
+#define update_neu_I( neuron, I, synapse, n_s_list, post_g )     \
 {                                                                \
     AlphaSyn *tmp_syn;                                           \
     post_g = 0.0;                                                \
@@ -108,30 +107,33 @@ struct AlphaSyn
     {   tmp_syn = synapse + n_s_list[j];                         \
         post_g += tmp_syn->g * tmp_syn->sign;                    \
     }                                                            \
-    I = I_ext + post_g*( neuron.V-neuron.Vr );                   \
+    I = post_g*( neuron.V-neuron.Vr );                           \
 }
 __global__ void gpu_run( int N, double dt, 
                          int neu_num, LeakyIAF *neuron, 
                          int *neu_syn_list,
                          int syn_num, AlphaSyn *synapse, 
                          AlphaSynNL *syn_neu_list,
-                         int *spike_list
+                         int *spike_list,
+                         int I_ext_num, int I_ext_len,
+                         double *I_ext
                        )
 {
     // Constant for neuron update
-    __shared__ double BH[MAX_THREAD];
-    __shared__ double IC[MAX_THREAD]; 
+    //__shared__ double BH[MAX_THREAD];
+    //__shared__ double IC[MAX_THREAD]; 
 
     const int tid = threadIdx.x+threadIdx.y*blockDim.x;
-    const int uid = tid;  // unit id; unit is either neuron or synapse
-    int sid = uid;        // spike id, updated per dt
-    
+    const int uid = tid + blockIdx.x * blockDim.x;  // unit idx; unit is either neuron or synapse
+    int sid = uid;                                  // spike idx, updated per dt
+    int eid = uid;                                  // external current idx, updated per dt
+
     // local copy of neuron parameters
     int* n_s_list;
-    double post_g, I=0.0;
+    double bh, ic, post_g, I=0.0;
     int *dt_spk_list = spike_list;
     if( uid < neu_num )
-        neu_thread_copy( neuron[uid], BH[tid], IC[tid], n_s_list, neu_syn_list );
+        neu_thread_copy( neuron[uid], bh, ic, n_s_list, neu_syn_list );
 
     // local copy of synapse parameters
     double g_new[3],tau_r, gmax;
@@ -146,24 +148,29 @@ __global__ void gpu_run( int N, double dt,
     {
         // Update Neuron Membrane Voltage
         if( uid < neu_num )
-            update_neu_V( neuron[uid], I, BH[tid], IC[tid], spike_list[sid] );
+            update_neu_V( neuron[uid], I, bh, ic, spike_list[sid] );
 
         // Update Synapse Status
         if( uid < syn_num )
             update_syn_G( synapse[uid], g_old, g_new, gmax, tau_r, 
                           s_n_list, dt_spk_list );
         
-        // Update injected current of Neuron
-        if( uid < neu_num )
-            update_neu_I( neuron[uid], I, synapse, n_s_list, post_g, 0.0);
+        // Update External Current
+        if( uid < I_ext_num && i < I_ext_len ) I = I_ext[eid];
 
-        // Update Spike ID and dt-spike array address
+        // Update Synaptic Current 
+        if( uid < neu_num )
+            update_neu_I( neuron[uid], I, synapse, n_s_list, post_g);
+
+        // Update Spike idx, external current idx, and dt-spike array address
         sid += neu_num;
+        eid += I_ext_num;
         dt_spk_list += neu_num;
+
     }
 }
 """
-
+MAX_THREAD = 512
 cuda_func = SourceModule(cuda_source, options = ["--ptxas-options=-v"])
 cuda_gpu_run = cuda_func.get_function("gpu_run")
 
@@ -358,18 +365,22 @@ class Early_olfaction_Network:
         gpu_syn_neu_list = np.array( zip(agg_neu,agg_coe), dtype=('i8,f8') )
 
         # Determine Bloack and Grid size
-        # TODO
-        return gpu_neu_list, gpu_neu_syn_list, gpu_syn_list, gpu_syn_neu_list
+        num = max(self.neu_num,self.syn_num)
+        gridx = (num/MAX_THREAD) if num%MAX_THREAD==0 else 1+num/MAX_THREAD
+        return gridx, gpu_neu_list, gpu_neu_syn_list, gpu_syn_list, gpu_syn_neu_list
 
     def gpu_run(self,dt,dur):
-        neu_list,neu_syn_list,syn_list,syn_neu_list = self.gpu_prepare(dt,dur)
+        gridx, neu_list,neu_syn_list,syn_list,syn_neu_list = self.gpu_prepare(dt,dur)
+        print gridx
         cuda_gpu_run( np.int32(self.Nt), np.double( dt ), 
                       np.int32(self.neu_num), 
                       drv.In(neu_list), drv.In(neu_syn_list),
                       np.int32(self.syn_num),
                       drv.In(syn_list), drv.In(syn_neu_list),
                       drv.Out( self.spk_list ),
-                      block=(512,1,1) )
+                      np.int32(0), np.int32(0),
+                      drv.In(np.zeros(1,dtype=np.float64)),
+                      block=(MAX_THREAD,1,1), grid=(gridx,1) )
 
     def compare_cpu_gpu(self,dt,dur):
         self.gpu_run(dt,dur)
