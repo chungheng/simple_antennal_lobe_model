@@ -43,7 +43,7 @@ struct LeakyIAF
 };
 struct AlphaSynNL
 {
-    int    neu_idx;
+    long   neu_idx;
     double neu_coe;
 };
 struct AlphaSyn
@@ -55,20 +55,15 @@ struct AlphaSyn
     int    num;    // number of innerved neuron 
     int    offset; // Offset in the array
 };
-#define update_V( neuron, bh, spk )  \
-{                                    \
-    neuron.V = neuron.V*bh;          \
-    spk = 0;                         \
-    if( neuron.V >= neuron.Vt )      \
-    {                                \
-        neuron.V = neuron.Vr;        \
-        spk = 1;                     \
-    }                                \
-}
-#define compute_ode_coef( neuron, bh, ic )  \
-{                                           \
-    bh = exp( -dt/neuron.tau );             \
-    ic = neuron.R*( 1.0-bh );               \
+#define update_neu_V( neuron, I, bh, ic, spk )  \
+{                                               \
+    neuron.V = neuron.V*bh + I*ic;              \
+    spk = 0;                                    \
+    if( neuron.V >= neuron.Vt )                 \
+    {                                           \
+        neuron.V = neuron.Vr;                   \
+        spk = 1;                                \
+    }                                           \
 }
 #define neu_thread_copy( neuron, bh, ic, n_s_list,               \
                          all_neu_syn_list )                      \
@@ -81,31 +76,40 @@ struct AlphaSyn
                          all_syn_neu_list )                      \
 {                                                                \
     gmax = synapse.gmax;                                         \
-    tr = synapse.taur;                                          \
+    tr = synapse.taur;                                           \
     s_n_list = all_syn_neu_list + synapse.offset;                \
 }
-
-#define update_G( synapse, g_old, g_new, gmax, tr,               \
-                  s_n_list,  spk_list  )                         \
+#define update_syn_G( synapse, g_old, g_new, gmax, tr,           \
+                      s_n_list,  spk_list  )                     \
 {                                                                \
     /* Update g(t) */                                            \
-    g_new[0] = g_old[0];                                         \
+    g_new[0] = g_old[0] + dt*g_old[1];                           \
     if( g_new[0] < 0.0 ) g_new[0] = 0.0;                         \
                                                                  \
     /* Update g'(t) */                                           \
     g_new[1] = g_old[1] + dt*g_old[2];                           \
     for( int j=0; j<synapse.num; ++j)                            \
         if( spk_list[ s_n_list[j].neu_idx ] )                    \
-            g_new[1] += s_n_list[j].neu_coe;                     \
+            g_new[1] += (s_n_list[j].neu_coe);                   \
                                                                  \
     /* Update g"(t) */                                           \
-    g_new[2] = (-2.0*g_old[1] - tr*g_old[2])*tr;                 \
+    g_new[2] = (-2.0*g_old[1] - tr*g_old[0])*tr;                 \
     /* Copy g_old to g_new */                                    \
-    for( int i=0; i<3; ++i ) g_old[i] = g_new[i];                \
+    for( int j=0; j<3; ++j ) g_old[j] = g_new[j];                \
     synapse.g = gmax*g_new[0];                                   \
     __syncthreads();                                             \
 }
-
+#define update_neu_I( neuron, I, synapse, n_s_list,              \
+                      post_g, I_ext )                            \
+{                                                                \
+    AlphaSyn *tmp_syn;                                           \
+    post_g = 0.0;                                                \
+    for( int j=0; j<neuron.num; ++j )                            \
+    {   tmp_syn = synapse + n_s_list[j];                         \
+        post_g += tmp_syn->g * tmp_syn->sign;                    \
+    }                                                            \
+    I = I_ext + post_g*( neuron.V-neuron.Vr );                   \
+}
 __global__ void gpu_run( int N, double dt, 
                          int neu_num, LeakyIAF *neuron, 
                          int *neu_syn_list,
@@ -115,47 +119,44 @@ __global__ void gpu_run( int N, double dt,
                        )
 {
     // Constant for neuron update
-    //__shared__ double BH[MAX_THREAD];
-    //__shared__ double IC[MAX_THREAD]; 
+    __shared__ double BH[MAX_THREAD];
+    __shared__ double IC[MAX_THREAD]; 
 
     const int tid = threadIdx.x+threadIdx.y*blockDim.x;
     const int uid = tid;  // unit id; unit is either neuron or synapse
     int sid = uid;        // spike id, updated per dt
     
-    
-
     // local copy of neuron parameters
     int* n_s_list;
-    double bh, ic;
+    double post_g, I=0.0;
     int *dt_spk_list = spike_list;
     if( uid < neu_num )
-        neu_thread_copy( neuron[uid], bh, ic, n_s_list, neu_syn_list );
-
+        neu_thread_copy( neuron[uid], BH[tid], IC[tid], n_s_list, neu_syn_list );
 
     // local copy of synapse parameters
     double g_new[3],tau_r, gmax;
     double g_old[3] = {0, 0, 0};
     AlphaSynNL *s_n_list;
     if( uid < syn_num )
-        syn_thread_copy( synapse[uid], tau_r, gmax, s_n_list, syn_neu_list );
+        syn_thread_copy( synapse[tid], tau_r, gmax, s_n_list, syn_neu_list );
 
-
-    // Compute coefficients for Exponential Euler Method
-    //if( uid < neu_num )
-    //    compute_ode_coef( neuron[uid], bh, ic )
     
     // Simulation Loop
     for( int i = 0; i<N; ++i )
     {
         // Update Neuron Membrane Voltage
         if( uid < neu_num )
-            update_V( neuron[uid], bh, spike_list[sid] );
+            update_neu_V( neuron[uid], I, BH[tid], IC[tid], spike_list[sid] );
 
         // Update Synapse Status
         if( uid < syn_num )
-            update_G( synapse[uid], g_old, g_new, 
-                      gmax, tau_r, s_n_list, dt_spk_list );
+            update_syn_G( synapse[uid], g_old, g_new, gmax, tau_r, 
+                          s_n_list, dt_spk_list );
         
+        // Update injected current of Neuron
+        if( uid < neu_num )
+            update_neu_I( neuron[uid], I, synapse, n_s_list, post_g, 0.0);
+
         // Update Spike ID and dt-spike array address
         sid += neu_num;
         dt_spk_list += neu_num;
@@ -208,8 +209,6 @@ class IAFNeu:
         self.I = 0
         self.spk = False
         
-        # NOt clear when to set -dt/tau
-        #self.bh = np.exp(-dt/self.tau)
     def update_BH(self,dt):
         self.bh = np.exp(-dt/self.tau)
     
@@ -347,16 +346,16 @@ class Early_olfaction_Network:
         gpu_neu_syn_list = np.array( agg_syn, dtype=np.int32 )
         
         # Merge Synapse data
-        gpu_syn_list = np.zeros( (self.syn_num,6),dtype=('f8,f8,f8,f8,i4,i4') )
+        gpu_syn_list = np.zeros( self.syn_num,dtype=('f8,f8,f8,f8,i4,i4') )
         offset, agg_neu, agg_coe = 0, [], []
         for i in xrange( self.syn_num ):
             s = self.syn_list[i]
-            gpu_syn_list[i,:] = (s.g, s.gmax, s.taur, s.sign, 
+            gpu_syn_list[i] = (s.g, s.gmax, s.taur, s.sign, 
                                  len(s.neu_list), offset)
             offset += len(s.neu_list)
             agg_neu.extend( s.neu_list )
             agg_coe.extend( s.neu_coef )
-        gpu_syn_neu_list = np.array( zip(agg_neu,agg_coe), dtype=('i4,f8') )
+        gpu_syn_neu_list = np.array( zip(agg_neu,agg_coe), dtype=('i8,f8') )
 
         # Determine Bloack and Grid size
         # TODO
@@ -369,7 +368,8 @@ class Early_olfaction_Network:
                       drv.In(neu_list), drv.In(neu_syn_list),
                       np.int32(self.syn_num),
                       drv.In(syn_list), drv.In(syn_neu_list),
-                      drv.Out( self.spk_list ),block=(1024,1,1) )
+                      drv.Out( self.spk_list ),
+                      block=(512,1,1) )
 
     def compare_cpu_gpu(self,dt,dur):
         self.gpu_run(dt,dur)
@@ -377,9 +377,9 @@ class Early_olfaction_Network:
         self.cpu_run(dt,dur)
         compare = self.spk_list == gpu_spk
         if gpu_spk.size == compare.sum():
-            print "Cool, cpu and gpu gives the same result!!"
+            print "Cool, cpu and gpu give the same result!!"
         else:
-            print "Bomb!! cpu and gpu gives different reults!!"
+            print "Bomb!! cpu and gpu give different reults!!"
 
 
     def plot_raster(self, show_stems=True, show_axes=True, show_y_ticks=True,
