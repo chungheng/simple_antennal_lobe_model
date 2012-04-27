@@ -337,7 +337,12 @@ class Early_olfaction_Network:
                     self.neu_list[j].update_I(self.syn_list)
             self.spk_list[i,:] = dt_spk_list
         print ""
-            
+    
+    def list_notempty(self,input):
+        # Return dummy array if the input is empty. The empty array will cause exception when 
+        # one tries to use driver.In()
+        return input if len(input) > 0 else np.zeros(1)
+
     def gpu_prepare(self,dt,dur):
         self.basic_prepare(dt,dur)
         
@@ -350,10 +355,10 @@ class Early_olfaction_Network:
                                 n.R, len(n.syn_list), offset)
             offset += len( n.syn_list )
             agg_syn.extend( n.syn_list  )
-        gpu_neu_syn_list = np.array( agg_syn, dtype=np.int32 )
+        gpu_neu_syn_list = self.list_notempty( np.array( agg_syn, dtype=np.int32 ) )
         
         # Merge Synapse data
-        gpu_syn_list = np.zeros( self.syn_num,dtype=('f8,f8,f8,f8,i4,i4') )
+        gpu_syn_list = self.list_notempty( np.zeros( self.syn_num,dtype=('f8,f8,f8,f8,i4,i4') ))
         offset, agg_neu, agg_coe = 0, [], []
         for i in xrange( self.syn_num ):
             s = self.syn_list[i]
@@ -362,16 +367,16 @@ class Early_olfaction_Network:
             offset += len(s.neu_list)
             agg_neu.extend( s.neu_list )
             agg_coe.extend( s.neu_coef )
-        gpu_syn_neu_list = np.array( zip(agg_neu,agg_coe), dtype=('i8,f8') )
+        gpu_syn_neu_list = self.list_notempty(np.array( zip(agg_neu,agg_coe), dtype=('i8,f8') ))
 
         # Determine Bloack and Grid size
         num = max(self.neu_num,self.syn_num)
         gridx = (num/MAX_THREAD) if num%MAX_THREAD==0 else 1+num/MAX_THREAD
         return gridx, gpu_neu_list, gpu_neu_syn_list, gpu_syn_list, gpu_syn_neu_list
 
+
     def gpu_run(self,dt,dur):
         gridx, neu_list,neu_syn_list,syn_list,syn_neu_list = self.gpu_prepare(dt,dur)
-        print gridx
         cuda_gpu_run( np.int32(self.Nt), np.double( dt ), 
                       np.int32(self.neu_num), 
                       drv.In(neu_list), drv.In(neu_syn_list),
