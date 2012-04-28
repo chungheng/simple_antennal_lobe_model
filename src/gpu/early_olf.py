@@ -236,6 +236,10 @@ class IAFNeu:
         self.I = I_ext + g*(self.V-self.Vr)
 
 class Early_olfaction_Network:
+    def readDt(self,dt):
+        self.dt = dt
+    def readDuration(self,dur):
+        self.dur = dur
     def readNeuron(self,f,neu_num):
         for i in xrange(neu_num):
             lineInFile = f.readline()
@@ -290,6 +294,8 @@ class Early_olfaction_Network:
         self.neu_name = {}
         self.syn_list = []
         self.syn_name = {}
+        self.dt  = 0.
+        self.dur = 0.
         
         f = open(filename,'r')
         while True:
@@ -299,19 +305,27 @@ class Early_olfaction_Network:
                 dtype, dnum = s.split(' ')
             except:
                 sys.exit("Usage: <Neuron/Synapse/PreSyn> DataNum\n" + s)
-            if dtype == 'Neuron': self.readNeuron(f, int(dnum))
-            if dtype == 'Synapse': self.readSynapse(f, int(dnum))
-            if dtype == 'PreSyn': self.readPreSyn(f, int(dnum))
-            if dtype == 'Ignore': self.readIgnore(f, int(dnum))
+            if dtype == 'Duration': self.readDuration(float(dnum))
+            if dtype == 'Dt'      : self.readDt(float(dnum))
+            if dtype == 'Neuron'  : self.readNeuron(f, int(dnum))
+            if dtype == 'Synapse' : self.readSynapse(f, int(dnum))
+            if dtype == 'PreSyn'  : self.readPreSyn(f, int(dnum))
+            if dtype == 'Ignore'  : self.readIgnore(f, int(dnum))
                 
         self.spk_list = []
         self.neu_num = len(self.neu_list)
         self.syn_num = len(self.syn_list)
 
     def basic_prepare(self,dt,dur):
-        self.Nt = int(dur/dt)
-        self.dt = dt
-        self.dur = dur
+        if self.neu_num == 0:
+            sys.exit("Can't run simulation without any neuron...")
+        self.dt = self.dt if dt == 0. else dt
+        self.dur = self.dur if dur == 0. else dur
+        if self.dt <= 0.:
+            sys.exit("dt should be declared or greater than zero.")
+        if self.dur <= 0.:
+            sys.exit("Duration should be declared or greater than zero.")
+        self.Nt = int(self.dur/self.dt)
         self.spk_list = np.zeros((self.Nt,self.neu_num), np.int32)
  
     def cpu_prepare(self,dt,dur):
@@ -319,7 +333,7 @@ class Early_olfaction_Network:
         for neu in self.neu_list:
             neu.update_BH(dt)
  
-    def cpu_run(self,dt,dur,I_ext=np.empty((0,0))):
+    def cpu_run(self,dt=0.,dur=0.,I_ext=np.empty((0,0))):
         self.cpu_prepare(dt,dur)
         pbar = pb.ProgressBar(maxval=self.Nt).start()
         dt_spk_list = np.empty(self.neu_num).astype(np.bool)
@@ -343,7 +357,7 @@ class Early_olfaction_Network:
         # one tries to use driver.In()
         return input if len(input) > 0 else np.zeros(1)
 
-    def gpu_prepare(self,dt,dur):
+    def gpu_prepare(self,dt=0,dur=0):
         self.basic_prepare(dt,dur)
         
         # Merge Neuron data
@@ -375,7 +389,7 @@ class Early_olfaction_Network:
         return gridx, gpu_neu_list, gpu_neu_syn_list, gpu_syn_list, gpu_syn_neu_list
 
 
-    def gpu_run(self,dt,dur):
+    def gpu_run(self,dt=0.,dur=0.,I_ext=np.empty((0,0))):
         gridx, neu_list,neu_syn_list,syn_list,syn_neu_list = self.gpu_prepare(dt,dur)
         cuda_gpu_run( np.int32(self.Nt), np.double( dt ), 
                       np.int32(self.neu_num), 
@@ -383,8 +397,8 @@ class Early_olfaction_Network:
                       np.int32(self.syn_num),
                       drv.In(syn_list), drv.In(syn_neu_list),
                       drv.Out( self.spk_list ),
-                      np.int32(0), np.int32(0),
-                      drv.In(np.zeros(1,dtype=np.float64)),
+                      np.int32(I_ext.shape[0]), np.int32(I_ext.shape[1]),
+                      drv.In(self.list_notempty(I_ext.astype(np.float64))),
                       block=(MAX_THREAD,1,1), grid=(gridx,1) )
 
     def compare_cpu_gpu(self,dt,dur):
@@ -447,18 +461,18 @@ if __name__=='__main__':
         sys.exit()
         
 if sys.argv[1] == 'Read_Olf':
-    dt = 1e-5
-    dur = 1.
+    #dt = 1e-5
+    #dur = 1.
     curtime = strftime("[%a_%d_%b_%Y_%H_%M_%S]", gmtime())
     filename = sys.argv[2]
     olfnet = Early_olfaction_Network( datapath + filename)
-    olfnet.cpu_run(dt,dur)
+    olfnet.cpu_run()
     olfnet.plot_raster(show_stems=False, show_axes=False, 
                             show_y_ticks=False, markersize=5,
                             file_name=picpath+filename+curtime+'cpu.png',
                             fig_title='cpu')
     olfnet = Early_olfaction_Network( datapath + filename)
-    olfnet.gpu_run(dt,dur)
+    olfnet.gpu_run()
     olfnet.plot_raster(show_stems=False, show_axes=False, 
                             show_y_ticks=False, markersize=5,
                             file_name=picpath+filename+curtime+'gpu.png',
