@@ -288,7 +288,24 @@ class Early_olfaction_Network:
     def readIgnore(self,f,ignore_num):
         for i in xrange(ignore_num):
             f.readline()
-            
+
+    def readPreSyn(self,f,presyn_num):
+        for i in xrange(presyn_num):
+            lineInFile = f.readline()
+            ln_neu, pre_neu, post_neu, coef = lineInFile.split(' ')
+            syn_name = pre_neu + '-' + post_neu
+            if self.neu_name.has_key( ln_neu ) == False: 
+                sys.exit('No such Local Neuron: ' + ln_neu)
+            if self.syn_name.has_key( syn_name ) == False: 
+                sys.exit('No such Synapse: ' + syn_name)
+            syn_idx = self.syn_name[ syn_name ]
+            self.syn_list[syn_idx].neu_list.append( self.neu_name[ ln_neu ] )
+            self.syn_list[syn_idx].neu_coef.append( float(coef) )
+
+    def readCurrent(self,f,current_num):
+        for i in xrange(current_num):
+            lineInFile = f.readline()
+
     def __init__(self,filename):
         self.neu_list = []
         self.neu_name = {}
@@ -311,7 +328,8 @@ class Early_olfaction_Network:
             if dtype == 'Synapse' : self.readSynapse(f, int(dnum))
             if dtype == 'PreSyn'  : self.readPreSyn(f, int(dnum))
             if dtype == 'Ignore'  : self.readIgnore(f, int(dnum))
-                
+            if dtype == 'Current' : self.readCurrent(f, int(dnum))
+
         self.spk_list = []
         self.neu_num = len(self.neu_list)
         self.syn_num = len(self.syn_list)
@@ -401,7 +419,7 @@ class Early_olfaction_Network:
                       drv.In(self.list_notempty(I_ext.astype(np.float64))),
                       block=(MAX_THREAD,1,1), grid=(gridx,1) )
 
-    def compare_cpu_gpu(self,dt,dur):
+    def compare_cpu_gpu(self,dt=0.,dur=0.):
         self.gpu_run(dt,dur)
         gpu_spk = self.spk_list
         self.cpu_run(dt,dur)
@@ -459,20 +477,24 @@ picpath  = '../../../pic/'
 if __name__=='__main__':
     if len(sys.argv) == 1:
         sys.exit()
+    filename = sys.argv[1]
+    olfnet = Early_olfaction_Network( datapath + filename )
+    olfnet.compare_cpu_gpu()
+     
         
 if sys.argv[1] == 'Read_Olf':
-    #dt = 1e-5
-    #dur = 1.
+    dt = 1e-5
+    dur = 1.
     curtime = strftime("[%a_%d_%b_%Y_%H_%M_%S]", gmtime())
     filename = sys.argv[2]
     olfnet = Early_olfaction_Network( datapath + filename)
-    olfnet.cpu_run()
+    olfnet.cpu_run(dt,dur)
     olfnet.plot_raster(show_stems=False, show_axes=False, 
                             show_y_ticks=False, markersize=5,
                             file_name=picpath+filename+curtime+'cpu.png',
                             fig_title='cpu')
     olfnet = Early_olfaction_Network( datapath + filename)
-    olfnet.gpu_run()
+    olfnet.gpu_run(dt,dur)
     olfnet.plot_raster(show_stems=False, show_axes=False, 
                             show_y_ticks=False, markersize=5,
                             file_name=picpath+filename+curtime+'gpu.png',
