@@ -25,6 +25,7 @@ mp.use('AGG')
 import pylab as p
 from pycuda.compiler import SourceModule
 from time import gmtime, strftime
+from collections import namedtuple
 import sys
 import progressbar as pb
 
@@ -173,6 +174,14 @@ __global__ void gpu_run( int N, double dt,
 MAX_THREAD = 512
 cuda_func = SourceModule(cuda_source, options = ["--ptxas-options=-v"])
 cuda_gpu_run = cuda_func.get_function("gpu_run")
+def myreadline(f):
+    while True:
+        line = f.readline()
+        if line == '': return '' # End of the file
+        line = line.strip()    
+        if line == '': continue
+        else: return line
+            
 
 class AlphaSyn:
     def __init__(self, neu_list, neu_coef, gmax, tau, sign=1):
@@ -235,6 +244,7 @@ class IAFNeu:
             g += s.g*s.sign
         self.I = I_ext + g*(self.V-self.Vr)
 
+Pulse = namedtuple('Pulse',['start','end','value'])
 class Early_olfaction_Network:
     def readDt(self,dt):
         self.dt = dt
@@ -242,8 +252,8 @@ class Early_olfaction_Network:
         self.dur = dur
     def readNeuron(self,f,neu_num):
         for i in xrange(neu_num):
-            lineInFile = f.readline()
-            name, V0, Vr, Vt, tau, R = lineInFile.split(' ')
+            lineInFile = myreadline(f)
+            name, V0, Vr, Vt, tau, R = lineInFile.split()
             if self.neu_name.has_key( name ): 
                 sys.exit('Deplicate declaration of Neuron: ' + name)
             self.neu_name[ name ] = len( self.neu_name )
@@ -256,8 +266,8 @@ class Early_olfaction_Network:
     
     def readSynapse(self,f,syn_num):
         for i in xrange(syn_num):
-            lineInFile = f.readline()
-            pre_neu, post_neu, gmax, tau, coef, sign = lineInFile.split(' ')
+            lineInFile = myreadline(f)
+            pre_neu, post_neu, gmax, tau, coef, sign = lineInFile.split()
             name = pre_neu + '-' + post_neu
             if self.syn_name.has_key( name ): 
                 sys.exit('Deplicate declaration of Synapse: ' + name)
@@ -270,12 +280,11 @@ class Early_olfaction_Network:
             self.syn_list.append( AlphaSyn( [self.neu_name[pre_neu]], 
                                   [float(coef)], float(gmax), float(tau), 
                                    float(sign)))
-            
         
     def readPreSyn(self,f,presyn_num):
         for i in xrange(presyn_num):
-            lineInFile = f.readline()
-            ln_neu, pre_neu, post_neu, coef = lineInFile.split(' ')
+            lineInFile = myreadline(f)
+            ln_neu, pre_neu, post_neu, coef = lineInFile.split()
             syn_name = pre_neu + '-' + post_neu
             if self.neu_name.has_key( ln_neu ) == False: 
                 sys.exit('No such Local Neuron: ' + ln_neu)
@@ -287,24 +296,44 @@ class Early_olfaction_Network:
             
     def readIgnore(self,f,ignore_num):
         for i in xrange(ignore_num):
-            f.readline()
-
-    def readPreSyn(self,f,presyn_num):
-        for i in xrange(presyn_num):
-            lineInFile = f.readline()
-            ln_neu, pre_neu, post_neu, coef = lineInFile.split(' ')
-            syn_name = pre_neu + '-' + post_neu
-            if self.neu_name.has_key( ln_neu ) == False: 
-                sys.exit('No such Local Neuron: ' + ln_neu)
-            if self.syn_name.has_key( syn_name ) == False: 
-                sys.exit('No such Synapse: ' + syn_name)
-            syn_idx = self.syn_name[ syn_name ]
-            self.syn_list[syn_idx].neu_list.append( self.neu_name[ ln_neu ] )
-            self.syn_list[syn_idx].neu_coef.append( float(coef) )
+            myreadline(f)
+    
+    def readOneLineCurrent(self,line):
+        name, pline = line.split(None,1)
+        if self.neu_name.has_key( name ) == False:
+            sys.exit("In: " + line + "No such Neuron: " + name )
+        while True:
+            seg = pline.split(None,3)
+            if len(seg) < 3:
+                sys.exit("In: " + line + \
+                         "Pulse contains beginning, end, and value: " + pline )
+            if self.curr_list.has_key( name ) == False: 
+                self.curr_list[name] = []
+            tmp = Pulse(float(seg[0]),float(seg[1]),float(seg[2]))
+            if tmp.start >= tmp.end:
+                sys.exit("In: " + line + \
+                         "Pulse Beginning should be less than Pulse End: " \
+                         + repr(tmp))
+            if len(seg) == 3: break
+            pline = seg[3]
 
     def readCurrent(self,f,current_num):
+        self.curr_list = {}
         for i in xrange(current_num):
-            lineInFile = f.readline()
+            lineInFile = myreadline(f)
+            if lineInFile == "":
+                sys.exit("Expect "+ repr(current_num) + " lines of current setting, " \
+                         + "but only read " + repr(i) )
+            self.readOneLineCurrent(lineInFile)
+    
+    def readCurrentFromFile(self,filename):
+        f = open( filename,'r' )
+        self.curr_list = {}
+        while True:
+            s = myreadline(f)
+            if s == '': break
+            self.readOneLineCurrent(s)
+
 
     def __init__(self,filename):
         self.neu_list = []
@@ -316,10 +345,10 @@ class Early_olfaction_Network:
         
         f = open(filename,'r')
         while True:
-            s = f.readline()
+            s = myreadline(f)
             if s == '': break
             try:
-                dtype, dnum = s.split(' ')
+                dtype, dnum = s.split()
             except:
                 sys.exit("Usage: <Neuron/Synapse/PreSyn> DataNum\n" + s)
             if dtype == 'Duration': self.readDuration(float(dnum))
@@ -476,9 +505,10 @@ picpath  = '../../../pic/'
 
 if __name__=='__main__':
     if len(sys.argv) == 1:
-        sys.exit()
-    filename = sys.argv[1]
-    olfnet = Early_olfaction_Network( datapath + filename )
+        sys.exit("Usage: python early_olf.py filename [currentfile]")
+    olfnet = Early_olfaction_Network( datapath + sys.argv[1] )
+    if len(sys.argv) == 3: 
+        olfnet.readCurrentFromFile( datapath + sys.argv[2] )
     olfnet.compare_cpu_gpu()
      
         
