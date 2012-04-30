@@ -314,6 +314,7 @@ class Early_olfaction_Network:
                 sys.exit("In: " + line + \
                          "Pulse Beginning should be less than Pulse End: " \
                          + repr(tmp))
+            self.curr_list[name].append(tmp)
             if len(seg) == 3: break
             pline = seg[3]
 
@@ -363,7 +364,37 @@ class Early_olfaction_Network:
         self.neu_num = len(self.neu_list)
         self.syn_num = len(self.syn_list)
 
-    def basic_prepare(self,dt,dur):
+    def genCurrent(self, I_ext=np.zeros((0,0))):
+        self.neu_cur_map = -1*np.ones(self.neu_num,dtype=np.int32)
+        if I_ext.size > 0:
+            self.I_ext = I_ext.astype(np.float64)
+            return
+        # Find number of neuron who has external current
+        max_pulse_end = 0
+        neu_w_curr = []
+        for name, pulse_list in self.curr_list.items():
+            neu_w_curr.append( self.neu_name[ name ] )
+            for pulse in pulse_list:
+                if max_pulse_end < pulse.end:
+                    max_pulse_end = pulse.end
+        neu_w_curr.sort()
+        self.I_ext = np.zeros((len(neu_w_curr),int(max_pulse_end/self.dt)))
+        # 
+        for name,pulse_list in self.curr_list.items():
+            neu_idx = self.neu_name[ name ]
+            cur_idx = neu_w_curr.index( neu_idx )
+            self.neu_cur_map[ neu_idx ] = cur_idx
+            for pulse in pulse_list:
+                self.I_ext[ cur_idx,\
+                           int(pulse.start/self.dt):\
+                           int(pulse.end/self.dt)] = pulse.value
+        t = np.arange(int(max_pulse_end/self.dt)) * self.dt
+        p.clf()
+        for i in self.I_ext:
+            p.plot( t, i )
+        p.savefig('current.png')
+
+    def basic_prepare(self,dt=0.,dur=0.):
         if self.neu_num == 0:
             sys.exit("Can't run simulation without any neuron...")
         self.dt = self.dt if dt == 0. else dt
@@ -399,10 +430,10 @@ class Early_olfaction_Network:
             self.spk_list[i,:] = dt_spk_list
         print ""
     
-    def list_notempty(self,input):
-        # Return dummy array if the input is empty. The empty array will cause exception when 
-        # one tries to use driver.In()
-        return input if len(input) > 0 else np.zeros(1)
+    def list_notempty(self, arr ):
+        # Return dummy array if the input is empty. The empty array will 
+        # cause exception when one tries to use driver.In()
+        return arr if arr.size > 0 else np.zeros(1)
 
     def gpu_prepare(self,dt=0,dur=0):
         self.basic_prepare(dt,dur)
@@ -419,7 +450,8 @@ class Early_olfaction_Network:
         gpu_neu_syn_list = self.list_notempty( np.array( agg_syn, dtype=np.int32 ) )
         
         # Merge Synapse data
-        gpu_syn_list = self.list_notempty( np.zeros( self.syn_num,dtype=('f8,f8,f8,f8,i4,i4') ))
+        gpu_syn_list = self.list_notempty( 
+                        np.zeros( self.syn_num,dtype=('f8,f8,f8,f8,i4,i4') ))
         offset, agg_neu, agg_coe = 0, [], []
         for i in xrange( self.syn_num ):
             s = self.syn_list[i]
@@ -428,7 +460,8 @@ class Early_olfaction_Network:
             offset += len(s.neu_list)
             agg_neu.extend( s.neu_list )
             agg_coe.extend( s.neu_coef )
-        gpu_syn_neu_list = self.list_notempty(np.array( zip(agg_neu,agg_coe), dtype=('i8,f8') ))
+        gpu_syn_neu_list = self.list_notempty(
+                             np.array( zip(agg_neu,agg_coe), dtype=('i8,f8') ))
 
         # Determine Bloack and Grid size
         num = max(self.neu_num,self.syn_num)
@@ -454,7 +487,7 @@ class Early_olfaction_Network:
         self.cpu_run(dt,dur)
         compare = self.spk_list == gpu_spk
         if gpu_spk.size == compare.sum():
-            print "Cool, cpu and gpu give the same result!!"
+            print "Cool!! cpu and gpu give the same result!!"
         else:
             print "Bomb!! cpu and gpu give different reults!!"
 
@@ -509,8 +542,9 @@ if __name__=='__main__':
     olfnet = Early_olfaction_Network( datapath + sys.argv[1] )
     if len(sys.argv) == 3: 
         olfnet.readCurrentFromFile( datapath + sys.argv[2] )
-    olfnet.compare_cpu_gpu()
-     
+    #olfnet.compare_cpu_gpu()
+    #olfnet.basic_prepare()
+    olfnet.genCurrent()
         
 if sys.argv[1] == 'Read_Olf':
     dt = 1e-5
