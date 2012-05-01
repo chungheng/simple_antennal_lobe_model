@@ -67,11 +67,13 @@ struct AlphaSyn
     }                                           \
 }
 #define neu_thread_copy( neuron, bh, ic, n_s_list,               \
-                         all_neu_syn_list )                      \
+                         all_neu_syn_list, cid, I_map, eid )     \
 {                                                                \
     bh = exp( -dt/neuron.tau );                                  \
     ic = neuron.R*( 1.0-bh );                                    \
     n_s_list = all_neu_syn_list + neuron.offset;                 \
+    cid = I_map;                                                 \
+    eid = cid;                                                   \
 }
 #define syn_thread_copy( synapse, tr, gmax, s_n_list,            \
                          all_syn_neu_list )                      \
@@ -108,7 +110,7 @@ struct AlphaSyn
     {   tmp_syn = synapse + n_s_list[j];                         \
         post_g += tmp_syn->g * tmp_syn->sign;                    \
     }                                                            \
-    I = post_g*( neuron.V-neuron.Vr );                           \
+    I = I + post_g*( neuron.V-neuron.Vr );                       \
 }
 __global__ void gpu_run( int N, double dt, 
                          int neu_num, LeakyIAF *neuron, 
@@ -116,6 +118,7 @@ __global__ void gpu_run( int N, double dt,
                          int syn_num, AlphaSyn *synapse, 
                          AlphaSynNL *syn_neu_list,
                          int *spike_list,
+                         int *I_ext_map, 
                          int I_ext_num, int I_ext_len,
                          double *I_ext
                        )
@@ -125,16 +128,19 @@ __global__ void gpu_run( int N, double dt,
     //__shared__ double IC[MAX_THREAD]; 
 
     const int tid = threadIdx.x+threadIdx.y*blockDim.x;
-    const int uid = tid + blockIdx.x * blockDim.x;  // unit idx; unit is either neuron or synapse
-    int sid = uid;                                  // spike idx, updated per dt
-    int eid = uid;                                  // external current idx, updated per dt
+    // unit idx; unit is either neuron or synapse
+    const int uid = tid + blockIdx.x * blockDim.x; 
+    int sid = uid;                // spike idx, updated per dt
+    int eid = 0;                  // external current idx, updated per dt
+    int cid = 0;
 
     // local copy of neuron parameters
     int* n_s_list;
     double bh, ic, post_g, I=0.0;
     int *dt_spk_list = spike_list;
     if( uid < neu_num )
-        neu_thread_copy( neuron[uid], bh, ic, n_s_list, neu_syn_list );
+        neu_thread_copy( neuron[uid], bh, ic, n_s_list, neu_syn_list,
+                         cid, I_ext_map[uid], eid );
 
     // local copy of synapse parameters
     double g_new[3],tau_r, gmax;
@@ -157,7 +163,8 @@ __global__ void gpu_run( int N, double dt,
                           s_n_list, dt_spk_list );
         
         // Update External Current
-        if( uid < I_ext_num && i < I_ext_len ) I = I_ext[eid];
+        I = 0.0;
+        if( cid!=-1 && i < I_ext_len ) I = I_ext[eid];
 
         // Update Synaptic Current 
         if( uid < neu_num )
@@ -167,7 +174,6 @@ __global__ void gpu_run( int N, double dt,
         sid += neu_num;
         eid += I_ext_num;
         dt_spk_list += neu_num;
-
     }
 }
 """
@@ -301,17 +307,17 @@ class Early_olfaction_Network:
     def readOneLineCurrent(self,line):
         name, pline = line.split(None,1)
         if self.neu_name.has_key( name ) == False:
-            sys.exit("In: " + line + "No such Neuron: " + name )
+            sys.exit("In: " + line + "\nNo such Neuron: " + name )
         while True:
             seg = pline.split(None,3)
             if len(seg) < 3:
-                sys.exit("In: " + line + \
+                sys.exit("In: " + line + "\n"\
                          "Pulse contains beginning, end, and value: " + pline )
             if self.curr_list.has_key( name ) == False: 
                 self.curr_list[name] = []
             tmp = Pulse(float(seg[0]),float(seg[1]),float(seg[2]))
             if tmp.start >= tmp.end:
-                sys.exit("In: " + line + \
+                sys.exit("In: " + line + "\n"\
                          "Pulse Beginning should be less than Pulse End: " \
                          + repr(tmp))
             self.curr_list[name].append(tmp)
@@ -323,7 +329,8 @@ class Early_olfaction_Network:
         for i in xrange(current_num):
             lineInFile = myreadline(f)
             if lineInFile == "":
-                sys.exit("Expect "+ repr(current_num) + " lines of current setting, " \
+                sys.exit("Expect "+ repr(current_num) \
+                         + " lines of current setting, " \
                          + "but only read " + repr(i) )
             self.readOneLineCurrent(lineInFile)
     
@@ -334,7 +341,6 @@ class Early_olfaction_Network:
             s = myreadline(f)
             if s == '': break
             self.readOneLineCurrent(s)
-
 
     def __init__(self,filename):
         self.neu_list = []
@@ -368,6 +374,7 @@ class Early_olfaction_Network:
         self.neu_cur_map = -1*np.ones(self.neu_num,dtype=np.int32)
         if I_ext.size > 0:
             self.I_ext = I_ext.astype(np.float64)
+            self.neu_cur_map[:I_ext.shape[0]] = range(I_ext.shape[0])
             return
         # Find number of neuron who has external current
         max_pulse_end = 0
@@ -378,23 +385,18 @@ class Early_olfaction_Network:
                 if max_pulse_end < pulse.end:
                     max_pulse_end = pulse.end
         neu_w_curr.sort()
-        self.I_ext = np.zeros((len(neu_w_curr),int(max_pulse_end/self.dt)))
+        self.I_ext = np.zeros((int(max_pulse_end/self.dt),len(neu_w_curr)))
         # 
         for name,pulse_list in self.curr_list.items():
             neu_idx = self.neu_name[ name ]
             cur_idx = neu_w_curr.index( neu_idx )
             self.neu_cur_map[ neu_idx ] = cur_idx
             for pulse in pulse_list:
-                self.I_ext[ cur_idx,\
-                           int(pulse.start/self.dt):\
-                           int(pulse.end/self.dt)] = pulse.value
+                self.I_ext[int(pulse.start/self.dt):\
+                           int(pulse.end/self.dt), cur_idx] = pulse.value
         t = np.arange(int(max_pulse_end/self.dt)) * self.dt
-        p.clf()
-        for i in self.I_ext:
-            p.plot( t, i )
-        p.savefig('current.png')
 
-    def basic_prepare(self,dt=0.,dur=0.):
+    def basic_prepare(self,dt=0.,dur=0.,I_ext=np.zeros((0,0))):
         if self.neu_num == 0:
             sys.exit("Can't run simulation without any neuron...")
         self.dt = self.dt if dt == 0. else dt
@@ -405,14 +407,15 @@ class Early_olfaction_Network:
             sys.exit("Duration should be declared or greater than zero.")
         self.Nt = int(self.dur/self.dt)
         self.spk_list = np.zeros((self.Nt,self.neu_num), np.int32)
- 
-    def cpu_prepare(self,dt,dur):
-        self.basic_prepare(dt,dur)
+        self.genCurrent( I_ext )
+
+    def cpu_prepare(self,dt,dur,I_ext):
+        self.basic_prepare(dt,dur,I_ext)
         for neu in self.neu_list:
-            neu.update_BH(dt)
+            neu.update_BH(self.dt)
  
     def cpu_run(self,dt=0.,dur=0.,I_ext=np.empty((0,0))):
-        self.cpu_prepare(dt,dur)
+        self.cpu_prepare(dt,dur,I_ext)
         pbar = pb.ProgressBar(maxval=self.Nt).start()
         dt_spk_list = np.empty(self.neu_num).astype(np.bool)
         for i in xrange(self.Nt):
@@ -421,10 +424,11 @@ class Early_olfaction_Network:
                 self.neu_list[j].update_V()
                 dt_spk_list[j] = self.neu_list[j].spk
             for syn in self.syn_list:
-                syn.update(dt,dt_spk_list)
+                syn.update(self.dt,dt_spk_list)
             for j in xrange(self.neu_num):
-                if j < I_ext.shape[0] and i < I_ext.shape[1] :
-                    self.neu_list[j].update_I(self.syn_list,I_ext[j,i])
+                I_idx = self.neu_cur_map[j]
+                if I_idx != -1 and i < self.I_ext.shape[0] :
+                    self.neu_list[j].update_I(self.syn_list,self.I_ext[i,I_idx])
                 else:
                     self.neu_list[j].update_I(self.syn_list)
             self.spk_list[i,:] = dt_spk_list
@@ -435,9 +439,8 @@ class Early_olfaction_Network:
         # cause exception when one tries to use driver.In()
         return arr if arr.size > 0 else np.zeros(1)
 
-    def gpu_prepare(self,dt=0,dur=0):
-        self.basic_prepare(dt,dur)
-        
+    def gpu_prepare(self,dt=0.,dur=0.,I_ext=np.empty((0,0))):
+        self.basic_prepare(dt,dur,I_ext)
         # Merge Neuron data
         gpu_neu_list = np.zeros( self.neu_num, dtype=('f8,f8,f8,f8,f8,i4,i4') )
         offset, agg_syn = 0,[]
@@ -471,26 +474,16 @@ class Early_olfaction_Network:
 
     def gpu_run(self,dt=0.,dur=0.,I_ext=np.empty((0,0))):
         gridx, neu_list,neu_syn_list,syn_list,syn_neu_list = self.gpu_prepare(dt,dur)
-        cuda_gpu_run( np.int32(self.Nt), np.double( dt ), 
+        cuda_gpu_run( np.int32(self.Nt), np.double( self.dt ), 
                       np.int32(self.neu_num), 
                       drv.In(neu_list), drv.In(neu_syn_list),
                       np.int32(self.syn_num),
                       drv.In(syn_list), drv.In(syn_neu_list),
                       drv.Out( self.spk_list ),
-                      np.int32(I_ext.shape[0]), np.int32(I_ext.shape[1]),
-                      drv.In(self.list_notempty(I_ext.astype(np.float64))),
+                      drv.In( self.neu_cur_map.astype(np.int32) ), 
+                      np.int32(self.I_ext.shape[1]), np.int32(self.I_ext.shape[0]),
+                      drv.In(self.list_notempty(self.I_ext.astype(np.float64))),
                       block=(MAX_THREAD,1,1), grid=(gridx,1) )
-
-    def compare_cpu_gpu(self,dt=0.,dur=0.):
-        self.gpu_run(dt,dur)
-        gpu_spk = self.spk_list
-        self.cpu_run(dt,dur)
-        compare = self.spk_list == gpu_spk
-        if gpu_spk.size == compare.sum():
-            print "Cool!! cpu and gpu give the same result!!"
-        else:
-            print "Bomb!! cpu and gpu give different reults!!"
-
 
     def plot_raster(self, show_stems=True, show_axes=True, show_y_ticks=True,
                     marker='.', markersize=5, fig_title='', file_name=''):
@@ -533,6 +526,18 @@ class Early_olfaction_Network:
             p.savefig(file_name)
         
 
+
+    def compare_cpu_gpu(self,dt=0.,dur=0.):
+        self.gpu_run(dt,dur)
+        gpu_spk = self.spk_list
+        self.cpu_run(dt,dur)
+        compare = self.spk_list == gpu_spk
+        if gpu_spk.size == compare.sum():
+            print "Cool!! cpu and gpu give the same result!!"
+        else:
+            print "Bomb!! cpu and gpu give different reults!!"
+
+
 datapath = '../../data/'
 picpath  = '../../../pic/'
 
@@ -542,9 +547,12 @@ if __name__=='__main__':
     olfnet = Early_olfaction_Network( datapath + sys.argv[1] )
     if len(sys.argv) == 3: 
         olfnet.readCurrentFromFile( datapath + sys.argv[2] )
-    #olfnet.compare_cpu_gpu()
-    #olfnet.basic_prepare()
-    olfnet.genCurrent()
+    olfnet.gpu_run()
+    curtime = strftime("[%a_%d_%b_%Y_%H_%M_%S]", gmtime())
+    olfnet.plot_raster(show_stems=False, show_axes=False, 
+                            show_y_ticks=False, markersize=5,
+                            file_name=picpath+sys.argv[1]+curtime+'.png',
+                            fig_title='gpu')
         
 if sys.argv[1] == 'Read_Olf':
     dt = 1e-5
@@ -557,13 +565,21 @@ if sys.argv[1] == 'Read_Olf':
                             show_y_ticks=False, markersize=5,
                             file_name=picpath+filename+curtime+'cpu.png',
                             fig_title='cpu')
+    cpu_spk = olfnet.spk_list
     olfnet = Early_olfaction_Network( datapath + filename)
     olfnet.gpu_run(dt,dur)
     olfnet.plot_raster(show_stems=False, show_axes=False, 
                             show_y_ticks=False, markersize=5,
                             file_name=picpath+filename+curtime+'gpu.png',
                             fig_title='gpu')
- 
+    gpu_spk = olfnet.spk_list
+    compare = cpu_spk == gpu_spk
+    if gpu_spk.size == compare.sum():
+        print "Cool!! cpu and gpu give the same result!!"
+    else:
+        print "Bomb!! cpu and gpu give different reults!!"
+
+
 if sys.argv[1] == 'compare_cpu_gpu':
     dt = 1e-5
     dur = 1.
