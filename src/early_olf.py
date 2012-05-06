@@ -365,7 +365,8 @@ class Early_olfaction_Network:
             if dtype == 'PreSyn'  : self.readPreSyn(f, int(dnum))
             if dtype == 'Ignore'  : self.readIgnore(f, int(dnum))
             if dtype == 'Current' : self.readCurrent(f, int(dnum))
-
+        
+        self.curr_list = {}
         self.spk_list = []
         self.neu_num = len(self.neu_list)
         self.syn_num = len(self.syn_list)
@@ -540,20 +541,7 @@ class Early_olfaction_Network:
 
 datapath = '../data/'
 picpath  = '../../pic/'
-
-if __name__=='__main__':
-    if len(sys.argv) == 1:
-        sys.exit("Usage: python early_olf.py filename [currentfile]")
-    olfnet = Early_olfaction_Network( datapath + sys.argv[1] )
-    if len(sys.argv) == 3: 
-        olfnet.readCurrentFromFile( datapath + sys.argv[2] )
-    olfnet.gpu_run()
-    curtime = strftime("[%a_%d_%b_%Y_%H_%M_%S]", gmtime())
-    olfnet.plot_raster(show_stems=False, show_axes=False, 
-                            show_y_ticks=False, markersize=5,
-                            file_name=picpath+sys.argv[1]+curtime+'.png',
-                            fig_title='gpu')
-        
+       
 if sys.argv[1] == 'Read_Olf':
     dt = 1e-5
     dur = 1.
@@ -578,7 +566,7 @@ if sys.argv[1] == 'Read_Olf':
         print "Cool!! cpu and gpu give the same result!!"
     else:
         print "Bomb!! cpu and gpu give different reults!!"
-
+    sys.exit()
 
 if sys.argv[1] == 'compare_cpu_gpu':
     dt = 1e-5
@@ -586,7 +574,8 @@ if sys.argv[1] == 'compare_cpu_gpu':
     filename = sys.argv[2]
     olfnet = Early_olfaction_Network( datapath + filename)
     olfnet.compare_cpu_gpu(dt,dur)
-        
+    sys.exit()
+
 if sys.argv[1] == 'synapse':
     dt = 1e-5
     t = np.arange(0,10,1e-5)
@@ -596,11 +585,23 @@ if sys.argv[1] == 'synapse':
     for i in xrange(t.shape[0]):
         syn.update(dt,spk_list[:,i])
         g[i] = syn.g
-
     p.figure()
-    
     p.subplot(2,1,1);p.plot(t,g)
     p.subplot(2,1,2);p.plot(t,spk_list[0,:],t,spk_list[1,:])
     p.legend(['Excitatory','Inhibitory'])
     p.savefig('./pic/test_syn.png')
+    sys.exit()
 
+if __name__=='__main__':
+    if len(sys.argv) == 1:
+        sys.exit("Usage: python early_olf.py filename [currentfile]")
+    olfnet = Early_olfaction_Network( datapath + sys.argv[1] )
+    if len(sys.argv) == 3: 
+        olfnet.readCurrentFromFile( datapath + sys.argv[2] )
+    olfnet.gpu_run()
+    curtime = strftime("[%a_%d_%b_%Y_%H_%M_%S]", gmtime())
+    olfnet.plot_raster(show_stems=False, show_axes=False, 
+                            show_y_ticks=False, markersize=5,
+                            file_name=picpath+sys.argv[1]+curtime+'.png',
+                            fig_title='gpu')
+ 
