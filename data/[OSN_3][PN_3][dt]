@@ -1,6 +1,6 @@
 
 Dt 1e-5
-Duration 1
+Duration 5
 Neuron 9
 OSN1 -0.045 -0.07 -0.022 0.6 1.1
 OSN2 -0.050 -0.065 -0.030 0.55 1.2
