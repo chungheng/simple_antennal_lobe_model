@@ -517,7 +517,7 @@ class Early_olfaction_Network:
         ax.xaxis.set_major_locator(mp.ticker.MultipleLocator(
                                    10.0**np.ceil(np.log10(self.dur/10))))
         p.xlabel('time, sec')
-        p.ylabel('Neuron')
+        #p.ylabel('Neuron')
         if fig_title:
             p.title(fig_title)
 
@@ -541,6 +541,37 @@ class Early_olfaction_Network:
 datapath = '../../data/'
 picpath  = '../../../pic/'
 
+if sys.argv[1]=='spiking_rate':
+    olfnet = Early_olfaction_Network( datapath + sys.argv[2] )
+    if len(sys.argv) == 4: 
+        olfnet.readCurrentFromFile( datapath + sys.argv[3] )
+    olfnet.gpu_run()
+    curtime = strftime("[%a_%d_%b_%Y_%H_%M_%S]", gmtime())
+    olfnet.plot_raster(show_stems=False, show_axes=False, 
+    	                        show_y_ticks=False, markersize=5,
+                            file_name=picpath+sys.argv[1]+curtime+'.png',
+                            fig_title=sys.argv[3])
+    dt = olfnet.dt
+    dur = olfnet.dur
+    intvl = 0.025
+    num = int((dur-intvl)/dt)
+    osn  = olfnet.spk_list[:,15]
+    pn   = olfnet.spk_list[:,39]
+    spk_rate = np.zeros((2,num))
+    print "in loop"
+    for i in xrange(num):
+	print i 
+	end = int((i*dt + intvl)/dt)
+	spk_rate[0,i] = float(sum(osn[i:end]))/intvl
+	spk_rate[1,i] = float(sum(pn[i:end]))/intvl
+    print "out_loop"
+    p.clf()
+    p.figure()
+    p.plot(dt*xrange(num),spk_rate[0])
+    p.xlabel('time, sec')
+    p.savefig(picpath+'spk_rate.png')
+    sys.exit()
+
 if __name__=='__main__':
     if len(sys.argv) == 1:
         sys.exit("Usage: python early_olf.py filename [currentfile]")
@@ -550,10 +581,10 @@ if __name__=='__main__':
     olfnet.gpu_run()
     curtime = strftime("[%a_%d_%b_%Y_%H_%M_%S]", gmtime())
     olfnet.plot_raster(show_stems=False, show_axes=False, 
-                            show_y_ticks=False, markersize=5,
+                            show_y_ticks=True, markersize=5,
                             file_name=picpath+sys.argv[1]+curtime+'.png',
                             fig_title='gpu')
-        
+    
 if sys.argv[1] == 'Read_Olf':
     dt = 1e-5
     dur = 1.
