@@ -497,7 +497,10 @@ class Early_olfaction_Network:
         ax.axis([0, self.dur, -0.5, self.neu_num-0.5 ])
         
         if show_y_ticks:
-            p.yticks(xrange(self.neu_num))
+            neu_name = [[] for i in xrange(self.neu_num)]
+            for name, idx in self.neu_name.items():
+                neu_name[idx] = name
+            p.yticks(xrange(self.neu_num),tuple(neu_name),fontsize=4)
         else:
             for tick_label in ax.get_yticklabels():
                 tick_label.set_visible(False)
@@ -583,7 +586,7 @@ if __name__=='__main__':
     olfnet.plot_raster(show_stems=False, show_axes=False, 
                             show_y_ticks=True, markersize=5,
                             file_name=picpath+sys.argv[1]+curtime+'.png',
-                            fig_title='gpu')
+                            fig_title=sys.argv[2])
     
 if sys.argv[1] == 'Read_Olf':
     dt = 1e-5
