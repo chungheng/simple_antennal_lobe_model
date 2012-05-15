@@ -176,10 +176,43 @@ __global__ void gpu_run( int N, double dt,
         dt_spk_list += neu_num;
     }
 }
+__global__ void spk_rate( int N, float dt, float overlap,
+                         int neu_num, int *spk_list, double *rate
+                       )
+{
+    const int tid = threadIdx.x+threadIdx.y*blockDim.x;
+    const int num = int(overlap/dt);
+    
+    if(tid>=neu_num) return;
+    int pre_half, post_half;
+    int pos = tid;
+    int idx = tid;
+    pre_half = 0;
+
+    for(int i = 0; i<num; ++i)
+    {
+        pre_half += spk_list[pos];
+        pos += neu_num;
+    }
+    for(int i = num+1; i<N-num; i+=num, idx+=neu_num )
+    {
+        post_half = 0;
+        for(int j = i; j<i+num; ++j)
+        {
+            post_half += spk_list[pos];
+            pos += neu_num;
+        }
+        rate[idx] = float( pre_half+post_half  )/overlap/2.0;
+        idx += neu_num;
+        pre_half = post_half;
+    }
+}
 """
 MAX_THREAD = 512
 cuda_func = SourceModule(cuda_source, options = ["--ptxas-options=-v"])
 cuda_gpu_run = cuda_func.get_function("gpu_run")
+cuda_spk_rate = cuda_func.get_function("spk_rate")
+
 def myreadline(f):
     while True:
         line = f.readline()
@@ -551,30 +584,24 @@ if sys.argv[1]=='spiking_rate':
     olfnet.gpu_run()
     curtime = strftime("[%a_%d_%b_%Y_%H_%M_%S]", gmtime())
     olfnet.plot_raster(show_stems=False, show_axes=False, 
-    	                        show_y_ticks=False, markersize=5,
-                            file_name=picpath+sys.argv[1]+curtime+'.png',
+    	                        show_y_ticks=True, markersize=5,
+                            file_name=picpath+sys.argv[2]+curtime+'.png',
                             fig_title=sys.argv[3])
     dt = olfnet.dt
     dur = olfnet.dur
     intvl = 0.025
-    num = int((dur-intvl)/dt)
-    osn  = olfnet.spk_list[:,15]
-    pn   = olfnet.spk_list[:,39]
-    spk_rate = np.zeros((2,num))
-    print "in loop"
-    for i in xrange(num):
-	print i 
-	end = int((i*dt + intvl)/dt)
-	spk_rate[0,i] = float(sum(osn[i:end]))/intvl
-	spk_rate[1,i] = float(sum(pn[i:end]))/intvl
-    print "out_loop"
-    p.clf()
-    p.figure()
-    p.plot(dt*xrange(num),spk_rate[0])
-    p.xlabel('time, sec')
-    p.savefig(picpath+'spk_rate.png')
-    sys.exit()
+    num = int(dur/intvl)
+    spk_rate = np.zeros((num,olfnet.neu_num),dtype=np.float64)
+    cuda_spk_rate( np.int32(olfnet.Nt),np.float32(dt),np.float32(intvl),
+                  np.int32(olfnet.neu_num),drv.In(olfnet.spk_list),
+                  drv.Out(spk_rate),
+                  block=(olfnet.neu_num,1,1))
 
+    p.clf()
+     
+    p.plot(np.arange(num)*intvl,spk_rate[:,4])
+    p.savefig(picpath+'aaa.png')
+    sys.exit()
 if __name__=='__main__':
     if len(sys.argv) == 1:
         sys.exit("Usage: python early_olf.py filename [currentfile]")

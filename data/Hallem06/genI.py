@@ -9,4 +9,4 @@ if __name__=='__main__':
     I   = np.array(reader.next()[1:],dtype=np.float64)
 
 for i in xrange(len(OSN)):
-    writer.writerow([OSN[i]+' 4.0 5.0 '+repr(I[i])])
+    writer.writerow([OSN[i]+' 1.0 2.0 '+repr(I[i])])
