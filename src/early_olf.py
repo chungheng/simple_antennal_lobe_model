@@ -176,10 +176,43 @@ __global__ void gpu_run( int N, double dt,
         dt_spk_list += neu_num;
     }
 }
+__global__ void spk_rate( int N, float dt, float overlap,
+                         int neu_num, int *spk_list, double *rate
+                       )
+{
+    const int tid = threadIdx.x+threadIdx.y*blockDim.x;
+    const int num = int(overlap/dt);
+    
+    if(tid>=neu_num) return;
+    int pre_half, post_half;
+    int spk_idx = tid;
+    int idx = tid;
+    pre_half = 0;
+
+    for(int i = 0; i<num; ++i)
+    {
+        pre_half += spk_list[spk_idx];
+        spk_idx += neu_num;
+    }
+    for(int i = num; i<N-num; i+=num, idx+=neu_num )
+    {
+        post_half = 0;
+        for(int j = i; j<i+num; ++j)
+        {
+            post_half += spk_list[spk_idx];
+            spk_idx += neu_num;
+        }
+        rate[idx] = float( post_half  )/overlap/2.0;
+        idx += neu_num;
+        pre_half = post_half;
+    }
+}
 """
 MAX_THREAD = 512
 cuda_func = SourceModule(cuda_source, options = ["--ptxas-options=-v"])
 cuda_gpu_run = cuda_func.get_function("gpu_run")
+cuda_spk_rate = cuda_func.get_function("spk_rate")
+
 def myreadline(f):
     while True:
         line = f.readline()
@@ -365,13 +398,13 @@ class Early_olfaction_Network:
             if dtype == 'PreSyn'  : self.readPreSyn(f, int(dnum))
             if dtype == 'Ignore'  : self.readIgnore(f, int(dnum))
             if dtype == 'Current' : self.readCurrent(f, int(dnum))
-        
-        self.curr_list = {}
+
         self.spk_list = []
         self.neu_num = len(self.neu_list)
         self.syn_num = len(self.syn_list)
 
     def genCurrent(self, I_ext=np.zeros((0,0))):
+        self.curr_list = {}
         self.neu_cur_map = -1*np.ones(self.neu_num,dtype=np.int32)
         if I_ext.size > 0:
             self.I_ext = I_ext.astype(np.float64)
@@ -487,7 +520,7 @@ class Early_olfaction_Network:
                       block=(MAX_THREAD,1,1), grid=(gridx,1) )
 
     def plot_raster(self, show_stems=True, show_axes=True, show_y_ticks=True,
-                    marker='|', markersize=5, fig_title='', file_name=''):
+                    marker='.', markersize=5, fig_title='', file_name=''):
         """
         This function is based on the homework 2 solution given by 
         Lev Givon.
@@ -498,7 +531,10 @@ class Early_olfaction_Network:
         ax.axis([0, self.dur, -0.5, self.neu_num-0.5 ])
         
         if show_y_ticks:
-            p.yticks(xrange(self.neu_num))
+            neu_name = [[] for i in xrange(self.neu_num)]
+            for name, idx in self.neu_name.items():
+                neu_name[idx] = name
+            p.yticks(xrange(self.neu_num),tuple(neu_name),fontsize=4)
         else:
             for tick_label in ax.get_yticklabels():
                 tick_label.set_visible(False)
@@ -518,7 +554,7 @@ class Early_olfaction_Network:
         ax.xaxis.set_major_locator(mp.ticker.MultipleLocator(
                                    10.0**np.ceil(np.log10(self.dur/10))))
         p.xlabel('time, sec')
-        p.ylabel('Neuron')
+        #p.ylabel('Neuron')
         if fig_title:
             p.title(fig_title)
 
@@ -539,9 +575,56 @@ class Early_olfaction_Network:
             print "Bomb!! cpu and gpu give different reults!!"
 
 
-datapath = '../data/'
-picpath  = '../../pic/'
-       
+datapath = '../../data/'
+picpath  = '../../../pic/'
+
+if sys.argv[1]=='spiking_rate':
+    olfnet = Early_olfaction_Network( datapath + sys.argv[2] )
+    if len(sys.argv) == 4: 
+        olfnet.readCurrentFromFile( datapath + sys.argv[3] )
+    olfnet.gpu_run()
+    curtime = strftime("[%a_%d_%b_%Y_%H_%M_%S]", gmtime())
+    olfnet.plot_raster(show_stems=False, show_axes=False, 
+    	               show_y_ticks=True, markersize=5,
+                       file_name=picpath+sys.argv[2]+curtime+'.png',
+                       fig_title=sys.argv[3])
+    dt = olfnet.dt
+    dur = olfnet.dur
+    intvl = 0.06
+    num = int(dur/intvl)
+    itvnum = int(intvl/dt)
+    runsum = np.zeros((2,num),np.int32)
+    for i in xrange(num):
+        for j in xrange(i*itvnum,(i+1)*itvnum):
+            runsum[0,i] += olfnet.spk_list[j,4];
+            runsum[1,i] += olfnet.spk_list[j,29];
+    tmp = runsum[:,:-1]+runsum[:,1:]
+
+    rate = tmp.astype(np.float32) / intvl / 2.
+    p.clf()
+     
+    p.plot(np.arange(num-1)*intvl,rate[0],'-b')
+    p.plot(np.arange(num-1)*intvl,rate[1],'-g')
+    p.legend(['OSN','PN'])
+    p.xlabel('time, sec')
+    p.ylabel('spiking rate, 1/sec')
+    p.title(sys.argv[3])
+    p.savefig(picpath+curtime+'.png')
+
+    sys.exit()
+if __name__=='__main__':
+    if len(sys.argv) == 1:
+        sys.exit("Usage: python early_olf.py filename [currentfile]")
+    olfnet = Early_olfaction_Network( datapath + sys.argv[1] )
+    if len(sys.argv) == 3: 
+        olfnet.readCurrentFromFile( datapath + sys.argv[2] )
+    olfnet.gpu_run()
+    curtime = strftime("[%a_%d_%b_%Y_%H_%M_%S]", gmtime())
+    olfnet.plot_raster(show_stems=False, show_axes=False, 
+                            show_y_ticks=True, markersize=5,
+                            file_name=picpath+sys.argv[1]+curtime+'.png',
+                            fig_title='Without Stimulus')
+    
 if sys.argv[1] == 'Read_Olf':
     dt = 1e-5
     dur = 1.
@@ -566,7 +649,7 @@ if sys.argv[1] == 'Read_Olf':
         print "Cool!! cpu and gpu give the same result!!"
     else:
         print "Bomb!! cpu and gpu give different reults!!"
-    sys.exit()
+
 
 if sys.argv[1] == 'compare_cpu_gpu':
     dt = 1e-5
@@ -574,8 +657,7 @@ if sys.argv[1] == 'compare_cpu_gpu':
     filename = sys.argv[2]
     olfnet = Early_olfaction_Network( datapath + filename)
     olfnet.compare_cpu_gpu(dt,dur)
-    sys.exit()
-
+        
 if sys.argv[1] == 'synapse':
     dt = 1e-5
     t = np.arange(0,10,1e-5)
@@ -585,23 +667,11 @@ if sys.argv[1] == 'synapse':
     for i in xrange(t.shape[0]):
         syn.update(dt,spk_list[:,i])
         g[i] = syn.g
+
     p.figure()
+    
     p.subplot(2,1,1);p.plot(t,g)
     p.subplot(2,1,2);p.plot(t,spk_list[0,:],t,spk_list[1,:])
     p.legend(['Excitatory','Inhibitory'])
     p.savefig('./pic/test_syn.png')
-    sys.exit()
 
-if __name__=='__main__':
-    if len(sys.argv) == 1:
-        sys.exit("Usage: python early_olf.py filename [currentfile]")
-    olfnet = Early_olfaction_Network( datapath + sys.argv[1] )
-    if len(sys.argv) == 3: 
-        olfnet.readCurrentFromFile( datapath + sys.argv[2] )
-    olfnet.gpu_run()
-    curtime = strftime("[%a_%d_%b_%Y_%H_%M_%S]", gmtime())
-    olfnet.plot_raster(show_stems=False, show_axes=False, 
-                            show_y_ticks=False, markersize=5,
-                            file_name=picpath+sys.argv[1]+curtime+'.png',
-                            fig_title='gpu')
- 
