@@ -66,6 +66,7 @@ struct AlphaSyn
         spk = 1;                                \
     }                                           \
 }
+
 #define neu_thread_copy( neuron, bh, ic, n_s_list,               \
                          all_neu_syn_list, cid, I_map, eid )     \
 {                                                                \
@@ -111,6 +112,13 @@ struct AlphaSyn
         post_g += tmp_syn->g * tmp_syn->sign;                    \
     }                                                            \
     I = I + post_g*( neuron.V-neuron.Vr );                       \
+}
+__global__ void run( // Neuron data
+                     // Synapse data
+                     // Input connectivity
+                   )
+{
+
 }
 __global__ void gpu_run( int N, double dt, 
                          int neu_num, LeakyIAF *neuron, 
@@ -237,7 +245,6 @@ class AlphaSyn:
         g_new[0] = max([0.,self.gvec[0] + dt * self.gvec[1]]);
         # update g'(t)
         g_new[1] = self.gvec[1] + dt * self.gvec[2]
-        #g_new[1] = self.gvec[1] + np.dot(self.neu_coef,spk_list[self.neu_list])
                 
         for n,w in zip(self.neu_list,self.neu_coef):
             if spk_list[n]:
@@ -575,8 +582,8 @@ class Early_olfaction_Network:
             print "Bomb!! cpu and gpu give different reults!!"
 
 
-datapath = '../../data/'
-picpath  = '../../../pic/'
+datapath = '../data/'
+picpath  = '../../pic/'
 
 if sys.argv[1]=='spiking_rate':
     olfnet = Early_olfaction_Network( datapath + sys.argv[2] )
