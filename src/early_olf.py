@@ -1,7 +1,7 @@
 """
   FileName    [ early_olf.py ]
   PackageName [ gpu ]
-  Synopsis    [ CPU/GPU simulation for the Early Olfaction of Drosphila ]
+  Synopsis    [ CPU/GPU simulation for the Early Olfaction of Drosophila ]
   Author      [ Chung-Heng Yeh <chyeh@ee.columbia.edu> ]
   Copyright   [ Copyleft(c) 2012-2014 Bionet Group at Columbia University ]
   Note        []
@@ -50,6 +50,7 @@ struct AlphaSynNL
 struct AlphaSyn
 {
     double g;
+    double alpha[3];
     double gmax;
     double taur;
     double sign;
@@ -76,15 +77,17 @@ struct AlphaSyn
     cid = I_map;                                                 \
     eid = cid;                                                   \
 }
-#define syn_thread_copy( synapse, tr, gmax, s_n_list,            \
-                         all_syn_neu_list )                      \
+#define syn_thread_copy( synapse, num, tr, gmax, sign,           \
+                         s_n_list, all_syn_neu_list )            \
 {                                                                \
+    num  = synapse.num;                                          \
     gmax = synapse.gmax;                                         \
-    tr = synapse.taur;                                           \
+    tr   = synapse.taur;                                         \
+    sign = synapse.sign;                                         \
     s_n_list = all_syn_neu_list + synapse.offset;                \
 }
-#define update_syn_G( synapse, g_old, g_new, gmax, tr,           \
-                      s_n_list,  spk_list  )                     \
+#define update_syn_G( g, num, g_old, g_new, gmax, tr,            \
+                      sign, s_n_list,  spk_list  )               \
 {                                                                \
     /* Update g(t) */                                            \
     g_new[0] = g_old[0] + dt*g_old[1];                           \
@@ -92,7 +95,7 @@ struct AlphaSyn
                                                                  \
     /* Update g'(t) */                                           \
     g_new[1] = g_old[1] + dt*g_old[2];                           \
-    for( int j=0; j<synapse.num; ++j)                            \
+    for( int j=0; j<num; ++j)                                    \
         if( spk_list[ s_n_list[j].neu_idx ] )                    \
             g_new[1] += (s_n_list[j].neu_coe);                   \
                                                                  \
@@ -100,25 +103,65 @@ struct AlphaSyn
     g_new[2] = (-2.0*g_old[1] - tr*g_old[0])*tr;                 \
     /* Copy g_old to g_new */                                    \
     for( int j=0; j<3; ++j ) g_old[j] = g_new[j];                \
-    synapse.g = gmax*g_new[0];                                   \
+    g = sign*gmax*g_new[0];                                      \
     __syncthreads();                                             \
 }
 #define update_neu_I( neuron, I, synapse, n_s_list, post_g )     \
 {                                                                \
     AlphaSyn *tmp_syn;                                           \
     post_g = 0.0;                                                \
+                                                                 \
     for( int j=0; j<neuron.num; ++j )                            \
-    {   tmp_syn = synapse + n_s_list[j];                         \
-        post_g += tmp_syn->g * tmp_syn->sign;                    \
+    {                                                            \
+        tmp_syn = synapse + n_s_list[j];                         \
+        post_g += tmp_syn->g;                                    \
     }                                                            \
     I = I + post_g*( neuron.V-neuron.Vr );                       \
 }
-__global__ void run( // Neuron data
-                     // Synapse data
-                     // Input connectivity
+__global__ void run( double dt, 
+                     int neu_num, LeakyIAF *neuron, 
+                     int *neu_syn_list,
+                     int syn_num, AlphaSyn *synapse, 
+                     AlphaSynNL *syn_neu_list,
+                     int *spike_list,
+                     int *I_ext_map, 
+                     int I_ext_num, int I_ext_len,
+                     double *I_ext
                    )
 {
+    // In this per-dt-run global function, status of one neuron and one 
+    // synapse are computed.
 
+
+    // thread id
+    const int tid = threadIdx.x + threadIdx.y*blockDim.x;
+    // Unit id, an unit is a neuron or a synapse.
+    const int uid = tid + blockIdx.x*gridDim.x; 
+
+    // Compute variables for further usage
+    
+    double I=0.0, ic, bh;  // For updating  
+    int *n_s_list;         // Synapses list of a neuron
+    double g_new[3];        //
+
+
+    // Update Synapse Status
+
+    
+    // Update Neuron External Current ( only for sensory neurons )
+    
+    // Update Neuron Post-synaptic Current ( summed with external current )
+    
+    // Update Neuron Membrane Voltage, spikes are recorded if neuron fires
+    if( neu_num > uid ){
+        bh = exp( -dt/neuron[uid].tau );
+        ic = neuron[uid].R;
+        
+    } // if
+    
+    // Update Neuron External Current ( only for sensory neurons )
+
+    // Update Neuron Post-synaptic Current ( summed with external current )
 }
 __global__ void gpu_run( int N, double dt, 
                          int neu_num, LeakyIAF *neuron, 
@@ -137,7 +180,7 @@ __global__ void gpu_run( int N, double dt,
 
     const int tid = threadIdx.x+threadIdx.y*blockDim.x;
     // unit idx; unit is either neuron or synapse
-    const int uid = tid + blockIdx.x * blockDim.x; 
+    const int uid = tid + blockIdx.x * gridDim.x; 
     int sid = uid;                // spike idx, updated per dt
     int eid = 0;                  // external current idx, updated per dt
     int cid = 0;
@@ -151,11 +194,13 @@ __global__ void gpu_run( int N, double dt,
                          cid, I_ext_map[uid], eid );
 
     // local copy of synapse parameters
-    double g_new[3],tau_r, gmax;
+    int num;
+    double g_new[3],tau_r, gmax, sign;
     double g_old[3] = {0, 0, 0};
     AlphaSynNL *s_n_list;
     if( uid < syn_num )
-        syn_thread_copy( synapse[tid], tau_r, gmax, s_n_list, syn_neu_list );
+        syn_thread_copy( synapse[uid], num, tau_r, gmax, sign, 
+                         s_n_list, syn_neu_list );
 
     
     // Simulation Loop
@@ -167,10 +212,10 @@ __global__ void gpu_run( int N, double dt,
 
         // Update Synapse Status
         if( uid < syn_num )
-            update_syn_G( synapse[uid], g_old, g_new, gmax, tau_r, 
-                          s_n_list, dt_spk_list );
+            update_syn_G( synapse[uid].g, num, g_old, g_new, gmax, tau_r,
+                          sign, s_n_list, dt_spk_list );
         
-        // Update External Current
+        // Update External Current( only for sensory neuron )
         I = 0.0;
         if( cid!=-1 && i < I_ext_len ) I = I_ext[eid];
 
@@ -494,13 +539,14 @@ class Early_olfaction_Network:
         gpu_neu_syn_list = self.list_notempty( np.array( agg_syn, dtype=np.int32 ) )
         
         # Merge Synapse data
-        gpu_syn_list = self.list_notempty( 
-                        np.zeros( self.syn_num,dtype=('f8,f8,f8,f8,i4,i4') ))
+        gpu_syn_list = self.list_notempty( np.zeros( self.syn_num,dtype=
+                                           ('f8,f8,f8,f8,f8,f8,f8,i4,i4') ))
         offset, agg_neu, agg_coe = 0, [], []
         for i in xrange( self.syn_num ):
             s = self.syn_list[i]
-            gpu_syn_list[i] = (s.g, s.gmax, s.taur, s.sign, 
-                                 len(s.neu_list), offset)
+            gpu_syn_list[i] = (s.g, np.float64(0.0), np.float64(0.0), 
+                               np.float64(0.0), s.gmax, s.taur, 
+                               s.sign, len(s.neu_list), offset)
             offset += len(s.neu_list)
             agg_neu.extend( s.neu_list )
             agg_coe.extend( s.neu_coef )
@@ -582,8 +628,8 @@ class Early_olfaction_Network:
             print "Bomb!! cpu and gpu give different reults!!"
 
 
-datapath = '../data/'
-picpath  = '../../pic/'
+datapath = './data/'
+picpath  = '../pic/'
 
 if sys.argv[1]=='spiking_rate':
     olfnet = Early_olfaction_Network( datapath + sys.argv[2] )
@@ -617,46 +663,7 @@ if sys.argv[1]=='spiking_rate':
     p.ylabel('spiking rate, 1/sec')
     p.title(sys.argv[3])
     p.savefig(picpath+curtime+'.png')
-
     sys.exit()
-if __name__=='__main__':
-    if len(sys.argv) == 1:
-        sys.exit("Usage: python early_olf.py filename [currentfile]")
-    olfnet = Early_olfaction_Network( datapath + sys.argv[1] )
-    if len(sys.argv) == 3: 
-        olfnet.readCurrentFromFile( datapath + sys.argv[2] )
-    olfnet.gpu_run()
-    curtime = strftime("[%a_%d_%b_%Y_%H_%M_%S]", gmtime())
-    olfnet.plot_raster(show_stems=False, show_axes=False, 
-                            show_y_ticks=True, markersize=5,
-                            file_name=picpath+sys.argv[1]+curtime+'.png',
-                            fig_title='Without Stimulus')
-    
-if sys.argv[1] == 'Read_Olf':
-    dt = 1e-5
-    dur = 1.
-    curtime = strftime("[%a_%d_%b_%Y_%H_%M_%S]", gmtime())
-    filename = sys.argv[2]
-    olfnet = Early_olfaction_Network( datapath + filename)
-    olfnet.cpu_run(dt,dur)
-    olfnet.plot_raster(show_stems=False, show_axes=False, 
-                            show_y_ticks=False, markersize=5,
-                            file_name=picpath+filename+curtime+'cpu.png',
-                            fig_title='cpu')
-    cpu_spk = olfnet.spk_list
-    olfnet = Early_olfaction_Network( datapath + filename)
-    olfnet.gpu_run(dt,dur)
-    olfnet.plot_raster(show_stems=False, show_axes=False, 
-                            show_y_ticks=False, markersize=5,
-                            file_name=picpath+filename+curtime+'gpu.png',
-                            fig_title='gpu')
-    gpu_spk = olfnet.spk_list
-    compare = cpu_spk == gpu_spk
-    if gpu_spk.size == compare.sum():
-        print "Cool!! cpu and gpu give the same result!!"
-    else:
-        print "Bomb!! cpu and gpu give different reults!!"
-
 
 if sys.argv[1] == 'compare_cpu_gpu':
     dt = 1e-5
@@ -664,7 +671,8 @@ if sys.argv[1] == 'compare_cpu_gpu':
     filename = sys.argv[2]
     olfnet = Early_olfaction_Network( datapath + filename)
     olfnet.compare_cpu_gpu(dt,dur)
-        
+    sys.exit()
+
 if sys.argv[1] == 'synapse':
     dt = 1e-5
     t = np.arange(0,10,1e-5)
@@ -681,4 +689,18 @@ if sys.argv[1] == 'synapse':
     p.subplot(2,1,2);p.plot(t,spk_list[0,:],t,spk_list[1,:])
     p.legend(['Excitatory','Inhibitory'])
     p.savefig('./pic/test_syn.png')
+    sys.exit()
 
+if __name__=='__main__':
+    if len(sys.argv) == 1:
+        sys.exit("Usage: python early_olf.py filename [currentfile]")
+    olfnet = Early_olfaction_Network( datapath + sys.argv[1] )
+    if len(sys.argv) == 3: 
+        olfnet.readCurrentFromFile( datapath + sys.argv[2] )
+    olfnet.gpu_run()
+    curtime = strftime("[%a_%d_%b_%Y_%H_%M_%S]", gmtime())
+    olfnet.plot_raster(show_stems=False, show_axes=False, 
+                            show_y_ticks=True, markersize=5,
+                            file_name=picpath+sys.argv[1]+curtime+'.png',
+                            fig_title='Without Stimulus')
+ 
